@@ -2,7 +2,7 @@
 
 ## 1.下载源码
 
-todo...
+git clone git@github.com:baidu/ARK.git
 
 ## 2.搭建环境
 
