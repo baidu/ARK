@@ -1,7 +1,7 @@
 # Welcome to Ark
 
 
-Ark is an intelligent operation and development framework implemented with an event-driven model. It proposes an intelligent operation engineering solution,to solve the following problems.
+Ark is a development framework of intelligent operation which is implemented with an event-driven model. It proposes an intelligent operation engineering solution,to solve the following problems.
 
 * no unified development model for operation and maintenance，the cost of development and maintenance is great and inefficient.
 * pool extensibility, experience is difficult to reuse.
