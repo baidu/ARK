@@ -1,10 +1,13 @@
 ##1.下载源码
+
 todo...
 
 ##2.搭建环境
+
 **智能运维机器人**在运行的过程中依赖两个开源的第三方组件（[ZooKeeper][1]和[Elasticsearch][2]），需要用户<font color="Brown" face="微软雅黑" size=3>自行部署</font>。ZooKeeper作为分布式协调系统，为智能运维机器人提供主从选举的功能和异常安全的保障。Elasticsearch作为全文搜索引擎，为用户提供提供事件和运行状态的存储与查询功能。
 
 ##3.修改配置
+
 解压压缩包
 `
 tar -zxvf ark.tar.gz
@@ -50,8 +53,11 @@ cd ./ark
 ```
 
 ##4.运行程序
+
 ###4.1 Demo示例1
+
 ####4.1.1示例代码
+
 下面Demo代码展示的是最基本的运维机器人功能，即，从本地文件读取感知信息，经决策后执行<font color="Brown" face="微软雅黑" size=3>say_hello</font>方法在日志中输出执行结果。
 Demo代码如下，将其写入./output/src/main.py
 ```python
@@ -86,6 +92,7 @@ def guardian_main():
 ```
 
 ####4.1.2创建本地文件
+
 在./output/目录下创建文件event，并写入模拟感知的json数据。
 *strategy*：报警参数名
 *hello*：报警参数值
@@ -96,19 +103,23 @@ echo '{"strategy": "hello"}' > ./event
 
 
 ####4.1.3运行
+
 ```
 cd bin
 ./control start # 返回0成功，非0失败
 ```
 
 ####4.1.4查看结果
+
 查看运行日志(./log/guardian-all.log)，可以看到如下输出，则表示运行成功
 ```
 hello, event params:{'.inner_executor_key': 'say_hello', u'strategy': u'hello'}
 ```
 
 ###4.2 Demo示例2
+
 ####4.2.1示例代码
+
 本次Demo展示的是状态机智能运维机器人的用法。机器人从本地文件读取感知消息，经决策后分步骤执行用户定义的操作，这些操作默认都是不可重入的。
 在下面的示例中，先执行State1，成功后执行State2。
 ```python
@@ -168,6 +179,7 @@ def guardian_main():
 Demo示例2的感知文件创建和执行流程同**Demo示例1**，不再赘述。执行成功之后，可在日志文件中看到打印信息
 
 ##5.其他操作-停止、重启
+
 在/output/bin目录执行
 停止
 `

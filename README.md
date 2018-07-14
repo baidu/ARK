@@ -17,5 +17,5 @@ Indices and tables
 
 Start with：
 * [Quick Start](./QUICK.md)
-* [Reference](http://aiops.baidu.com/ark/ark.html#module-ark)
+* [Reference](http://aiops.baidu.com/ark/ark.html)
 
