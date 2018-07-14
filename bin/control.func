@@ -1,0 +1,226 @@
+#!/bin/bash
+
+####简单说明，无调用接口
+function usage()
+{
+    cat <<-usage
+        Usage: ${SCRIPT_NAME} [start|stop|restart|reload|status|moitor|healthcheck]
+        Version: ${SCRIPT_NAME} ${VERSION} Copyright Baidu Inc.
+usage
+}
+
+
+####创建工作目录，设置环境
+function prepare()
+{
+    mkdir -p ${LOG_DIR}
+    mkdir -p ${DAT_DIR}
+    mkdir -p ${STA_DIR}
+    mkdir -p ${MON_DIR}
+    
+    touch ${LOG_DIR}/${SCRIPT_LOG}
+    exec 2>>${LOG_DIR}/${SCRIPT_LOG}
+    set -x
+    export PS4='+ [`basename ${BASH_SOURCE[0]}`:$LINENO ${FUNCNAME[0]} \D{%F %T} $$ ] '
+}
+
+
+####清理脚本输出日志文件
+function clean_log()
+{
+    local log_file="${LOG_DIR}/${SCRIPT_LOG}"
+    local current_line=0
+    current_line=`wc -l "${log_file}" | awk '{print $1}'`
+    if [ ${current_line} -ge ${SCRIPT_LOG_MAX_LINE} ];then
+        tail -${SCRIPT_LOG_MAX_LINE}  ${log_file} >${log_file}.${SCRIPT_PID}
+        mv ${log_file}.${SCRIPT_PID} ${log_file}
+    fi
+}
+
+
+####启动服务接口
+function start
+{
+    cd ${TOP_DIR}
+    get_pid
+    if [ "${PROC_PID}" == "NULL" ];then
+        get_spid
+        if [ "${PROC_SPID}" != "NULL" ];then
+            kill_proc ${PROC_SPID}
+            if [ $? -ne 0 ];then
+                return ${AOS_ERR}
+            fi
+        fi
+        get_opid
+        if [ "${PROC_OPID}" != "" -a "${PROC_OPID}" != " " -a "${PROC_OPID}" != "NULL" ];then
+            kill_proc ${PROC_OPID}
+            if [ $? -ne 0 ];then
+                return ${AOS_ERR}
+            fi
+        fi
+        start_cmd
+        start_check
+        if [ $? -ne 0 ];then
+            return ${AOS_ERR}
+        fi
+    else
+        get_ppid "${PROC_PID}"
+        if [ "${PROC_PPID}" == "NULL" -o "x${PROC_PPID}" == "x1" ];then
+            term_child_pids ${PROC_PID}
+            start_cmd
+            start_check
+            if [ $? -ne 0 ];then
+                return ${AOS_ERR}
+            fi
+        else
+            check_thread_num "${PROC_PID}" "${TRD_NUM}" "${TOP_DIR}"
+            if [ $?  -ne 0 ];then
+                return ${AOS_ERR}
+            fi
+        fi
+        check_guardian
+        if [ $? -ne 0 ];then
+            return ${AOS_ERR}
+        fi
+        return ${AOS_OK}
+    fi
+}
+
+
+#停止服务，由于存在日志进程，这里停止两次
+function stop
+{
+    stop_single
+    stop_single
+}
+
+####停止服务接口
+####提供kill -9或kill -15或优雅退出三种方式
+function stop_single
+{
+    cd ${TOP_DIR}
+    get_pid
+    if [ "${PROC_PID}" == "NULL" ];then
+        get_spid
+        if [ "${PROC_SPID}" == "NULL" ];then
+            return ${AOS_OK}
+        else
+            kill_proc ${PROC_SPID}
+            stop_check
+            if [ $? -ne 0 ];then
+                return ${AOS_ERR}
+            else
+                return ${AOS_OK}
+            fi
+        fi
+    else
+        get_ppid "${PROC_PID}"
+        if [ "${PROC_PPID}" == "NULL" -o "x${PROC_PPID}" == "x1" ];then
+            stop_cmd
+            for((i=0;i<=${MAX_STOP_CHK_TIME};i++))
+            do
+                check_proc_exist ${PROC_PID} "${TOP_DIR}"
+                if [ $? -ne 0 ];then
+                    break
+                else
+                    sleep 1
+                fi
+            done
+
+            sleep 2
+            kill -0 ${PROC_PID} &>/dev/null
+            if [ $? -ne 0 ];then
+                return ${AOS_OK}
+            else
+                kill_proc "${PROC_PID}"
+                if [ $? -ne 0 ];then
+                    return ${AOS_ERR}
+                else
+                    return ${AOS_OK}
+                fi
+            fi
+
+        else
+            kill_proc "${PROC_PPID}"
+            stop_cmd
+            for((i=0;i<=${MAX_STOP_CHK_TIME};i++))
+            do
+                check_proc_exist ${PROC_PID} "${TOP_DIR}"
+                if [ $? -ne 0 ];then
+                    break
+                else
+                    sleep 1
+                fi
+            done
+
+            sleep 2
+            kill -0 ${PROC_PID} &>/dev/null
+            if [ $? -ne 0 ];then
+                return ${AOS_OK}
+            else
+                kill_proc "${PROC_PID}"
+                if [ $? -ne 0 ];then
+                    return ${AOS_ERR}
+                else
+                    return ${AOS_OK}
+                fi
+            fi
+        fi
+    fi
+}
+
+
+####重启服务接口，调用stop和start接口
+####对stop接口返回值不做判断，原因是start接口会在起服务前清理孤儿进程或异常守护进程
+function restart
+{
+    stop
+
+    start
+}
+
+
+####服务状态检查接口，取代healthcheck，agent会定期执行
+function status()
+{
+    healthcheck
+    if [ $? -ne 0 ];then
+        return ${AOS_ERR}
+    else
+        return ${AOS_OK}
+    fi
+}
+
+
+####服务运行状态监控接口
+function monitor()
+{
+    healthcheck
+    if [ $? -ne 0 ];then
+        return ${AOS_ERR}
+    else
+        return ${AOS_OK}
+    fi
+}
+
+
+####程序动态reload接口
+function reload()
+{
+    RELOAD="$*"
+    start_check
+    if [ $? -ne 0 ];then
+        return ${AOS_ERR}
+    fi
+    cd ${TOP_DIR}
+    ${BIN_DIR}/${PROC_RELOAD_NAME} -p ${PROC_RELOAD_PORT} ${RELOAD} &>${LOG_DIR}/${CONTROL_LOG}
+    if [ $? -ne 0 ];then
+        return ${AOS_ERR}
+    fi
+    start_check
+    if [ $? -eq 0 ];then
+        return ${AOS_OK}
+    else
+        return ${AOS_ERR}
+    fi
+}

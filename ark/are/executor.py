@@ -1,0 +1,414 @@
+# -*- coding: UTF-8 -*-
+################################################################################
+#
+# Copyright (c) 2018 Baidu.com, Inc. All Rights Reserved
+#
+################################################################################
+"""
+``BaseExecutor`` 的各种派生实现，具体参见 :mod: `framework`
+"""
+import Queue
+import copy
+import multiprocessing
+import time
+import traceback
+
+from are import graph
+from are import context
+from are import framework
+from are import log
+from are import exception
+
+
+class BaseExecFuncSet(object):
+    """
+    通过继承 ``BaseExecFuncSet`` ，使用者可以将一系列的操作名与函数直接相关联。
+    所有的函数拥有相同的入参：params。相同的返回值：ret。
+
+    .. Note:: 与操作关联的函数必须为public属性
+    """
+
+    def list_all(self):
+        """
+        列出所有包含的函数名
+
+        :return: 函数名列表
+        :rtype: list(str)
+        """
+        func_name_list = []
+        all_elem = dir(self)
+        for elem_name in all_elem:
+            if elem_name[0:1] != "_" \
+                    and elem_name != "list_all" \
+                    and elem_name != "exec_func" \
+                    and type(getattr(self, elem_name)) == \
+                            type(getattr(self, "list_all")):
+                func_name_list.append(elem_name)
+        return func_name_list
+
+    def exec_func(self, func_name, params):
+        """
+        执行指定的函数
+
+        :param str func_name: 要执行的函数名
+        :param dict params: 执行入参，通常由决策模块生成
+        :return: 执行结果
+        :rtype: dict
+        """
+        return getattr(self, func_name)(params)
+
+
+def run_process(cls_instance, message):
+    """
+    运行一个子进程
+
+    :param MultiProcessExecutor cls_instance: 运行实例
+    :param Message message: 消息
+    :return: 执行结果
+    :rtype: dict
+    """
+    return cls_instance.message_handler(message)
+
+
+class MultiProcessExecutor(framework.BaseExecutor):
+    """
+    并发执行器基类。 ``MultiProcessExecutor`` 继承自 ``BaseExecutor`` 并提供了多进程
+    执行的能力。 ``MultiProcessExecutor`` 会根据指定的最大进程数开启进程池，并对待执行
+    消息进行异步处理。 ``MultiProcessExecutor`` 关注空闲消息，并在空闲消息到达后进行任务
+    启动和结果获取。
+    """
+    def __init__(self, process_count=1):
+        """
+        初始化方法
+
+        :param int process_count: 进程数
+        :return: 无返回
+        :rtype: None
+        :raises ETypeMismatch: 参数类型不匹配
+        """
+        if not isinstance(process_count, int) or process_count < 1 \
+                or process_count > 1000:
+            raise exception.ETypeMismatch(
+                "param process_count must be 1-1000 integer")
+        manager = multiprocessing.Manager()
+        self._result_queue = manager.Queue()
+        self._concerned_message_list = ["IDLE_MESSAGE", "DECIDED_MESSAGE"]
+        self._todo_message_queue = []
+        self._process_pool = multiprocessing.Pool(processes=process_count)
+
+    def __getstate__(self):
+        self_dict = self.__dict__.copy()
+        del self_dict['_process_pool']
+        return self_dict
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+    def on_execute_message(self, message):
+        """
+        执行器处理逻辑，该函数在空闲消息到来时，进行任务分发和结果获取操作
+
+        :param Message message: 消息对象
+        :return: 无返回
+        :rtype: None
+        :raises Exception: 进程池启动异常
+        :raises EUnknownEvent: 未知消息异常
+        """
+        if message.name == "DECIDED_MESSAGE":
+            self._todo_message_queue.append(message)
+        elif message.name == "IDLE_MESSAGE":
+            if not self._todo_message_queue:
+                pass
+            else:
+                todo_message = self._todo_message_queue.pop(0)
+                self.on_pre_action(todo_message)
+                self._process_pool.apply_async(run_process, (self, todo_message))
+            try:
+                ret = self._result_queue.get(block=False)
+            except Queue.Empty:
+                pass
+            else:
+                self.send(ret)
+        elif message.name in self._concerned_message_list:
+            self.on_extend_message(message)
+        else:
+            raise exception.EUnknownEvent(
+                "message type [{}] is not concerned".format(message.name))
+
+    def on_extend_message(self, message):
+        """
+        扩展消息的处理逻辑
+
+        :param Message message: 消息对象
+        :return: 无返回
+        :rtype: None
+        """
+        pass
+
+    def on_pre_action(self, message):
+        """
+        操作前的前置动作，在开启子进程执行操作之前调用
+
+        :param Message message: 消息对象
+        :return: 无返回
+        """
+        pass
+
+    def message_handler(self, message):
+        """
+        消息处理逻辑，该函数调用具体的消息执行函数，并获取结果放入结果队列中
+
+        .. Note:: 由于操作异步执行，因此各子进程执行结果统一放入多进程安全的结果队列，
+                 由主进程统一进程结果的后续处理
+
+        :param Message message: 消息对象
+        :return: 无返回
+        :rtype: None
+        """
+        try:
+            ret = self.execute_message(message)
+        except Exception as e:
+            ret = "err:{}".format(e)
+
+        message = framework.OperationMessage(
+            "COMPLETE_MESSAGE", message.operation_id, ret)
+        self._result_queue.put(message)
+        return
+
+    def execute_message(self, message):
+        """
+        事件具体执行逻辑
+
+        :param Message message: 消息对象
+        :return: 执行结果
+        :rtype: dict
+        :raises ENotImplement: 未实现
+        """
+        raise exception.ENotImplement("function is not implement")
+
+
+class CallbackExecutor(MultiProcessExecutor):
+        """
+        回调型执行器，该执行器一般与 ``BaseExecFuncSet`` 子类绑定，根据待执行消息中
+        _exec_key字段值，回调func_set中定义的操作方法，并返回执行结果
+        """
+        _exec_key = ".inner_executor_key"
+
+        def __init__(self, func_set, process_count=1):
+            """
+            初始化方法
+
+            :param BaseExecFuncSet func_set: 回调方法对象
+            :param int process_count: 进程数
+            """
+            super(CallbackExecutor, self).__init__(process_count)
+            self._func_set = func_set
+
+        def execute_message(self, message):
+            """
+            执行消息的具体逻辑
+
+            :param Message message: 消息对象
+            :return: 执行结果
+            :rtype: dict
+            """
+            return self._func_set.exec_func(
+                message.params[self._exec_key], message.params)
+
+
+class StateMachineExecutor(MultiProcessExecutor):
+    """
+    状态机执行器。该执行器会在待执行消息到来时，生成（Guardian实例迁移时会先加载当前运行状态）状态机对象，找一个空闲的处理子进程执行状态机。执行逻辑为：
+    * 选择当前运行状态（新建状态机当前状态为状态列表中第一个状态），并处理
+    * 处理完成后生成一个阶段性运行完成的message，将当前运行的状态机信息传递给决策器，决策器记录到context
+    * 根据返回的状态，进行下一个状态处理，直到返回结束标志，本次轮转结束
+    * 生成一个执行完成的message，由决策器进行数据记录和清理动作
+
+    .. Note:: ``StateMachineExecutor`` 状态机执行器额外关注控制消息，并在控制消息到来时
+            传递给运行中的状态机，用户可用状态机session.control_message获得该控制消息
+            的参数。
+    """
+    _inner_operation_key = ".inner_operation_key"
+
+    def __init__(self, nodes, process_count=1):
+        """
+        初始化方法
+
+        :param list(Node) nodes: 节点列表
+        :param int process_count: 最大进程数
+        """
+        super(StateMachineExecutor, self).__init__(process_count)
+        self._nodes = nodes
+        self._concerned_message_list = ["IDLE_MESSAGE", "DECIDED_MESSAGE",
+                                        "CONTROL_MESSAGE"]
+        self._graphs = {}
+        manager = multiprocessing.Manager()
+        self._control_message = manager.dict()
+
+    def on_pre_action(self, message):
+        """
+        操作前的前置动作，避免在子进程中获取context
+
+        :param Message message: 消息对象
+        :return: 无返回
+        """
+        guardian_context = context.GuardianContext.get_context()
+        operation = guardian_context.get_operation(message.operation_id)
+        message.params[self._inner_operation_key] = operation
+
+    def execute_message(self, message):
+        """
+        执行消息
+
+        :param Message message: 消息对象
+        :return: 无返回
+        :rtype: None
+        """
+        state_machine = self.__create_state_machine(message)
+        # 状态机启动
+        self.graph_start(state_machine)
+
+    def graph_start(self, state_machine):
+        """
+        状态机启动执行。状态机启动后，会根据每个节点执行的返回值，执行下一个节点，直到返回
+        结束或执行异常。在每个节点执行完成后，会向结果队列中发送消息，由主进程进行处理
+
+        :param StateMachine state_machine: 状态机实例
+        :return: 无返回
+        :rtype: None
+        """
+        session = state_machine.session
+        while True:
+            try:
+                control_message = copy.deepcopy(
+                    self._control_message[session.id])
+            except KeyError:
+                control_message = None
+            session.control_message = control_message
+            self._control_message[session.id] = None
+
+            #第一次运行的状态机，记录第一个节点信息
+            if state_machine.status == state_machine.Status.INITED:
+                todo_params = state_machine.dump()
+                todo_node = todo_params["current_node"]
+                todo_params = {
+                    "session": session,
+                    "finished_node": None,
+                    "current_node": todo_node,
+                    "timestamp": int(time.time())
+                }
+                todo_notice = framework.OperationMessage(
+                    "STATE_COMPLETE_MESSAGE",
+                    str(session.id), todo_params)
+                self._result_queue.put(todo_notice)
+                state_machine.status = state_machine.Status.RUNNING
+
+            if state_machine.status == state_machine.Status.RUNNING:
+                try:
+                    log.info("state machine run state:{}".format(session.id))
+                    todo_params = state_machine.dump()
+                    todo_node = todo_params["current_node"]
+                    state_machine.run_next()
+                    finished_params = state_machine.dump()
+                    session.status = finished_params["status"]
+                    session.current_node = finished_params["current_node"]
+                    session.nodes_process = copy.copy(
+                        finished_params["nodes_process"])
+                    session.nodes_process[session.current_node] = True
+                    current_node = session.current_node if \
+                        session.current_node != "ARK_NODE_END" else None
+                    params = {
+                        "session": session,
+                        "finished_node": todo_node,
+                        "current_node": current_node,
+                        "timestamp": int(time.time())
+                    }
+                    notice = framework.OperationMessage(
+                        "STATE_COMPLETE_MESSAGE",
+                        str(session.id), params)
+                    self._result_queue.put(notice)
+                except Exception as e:
+                    log.warning("graph run exception:{}".format(e))
+                    log.warning("err:{}".format(traceback.format_exc()))
+                    state_machine.status = state_machine.Status.FAILED
+                    break
+            else:
+                break
+        del self._control_message[session.id]
+        log.info(
+            "state machine run finished, operationId:{}".format(session.id))
+        message = framework.OperationMessage(
+            "COMPLETE_MESSAGE", str(session.id), session.__dict__)
+        self._result_queue.put(message)
+
+    def __create_state_machine(self, message):
+        """
+        创建状态机。新建时创建，实例迁移时重新加载
+
+        :param Message message: 消息对象
+        :return: 状态机实例
+        :rtype: StateMachine
+        """
+        operation = copy.deepcopy(message.params[self._inner_operation_key])
+        del message.params[self._inner_operation_key]
+
+        state_machine_session = operation.session
+        if not state_machine_session:
+            session = StateMachineSession(id=message.operation_id,
+                                          params=message.params)
+            state_machine = graph.StateMachine(session)
+            for node in self._nodes:
+                state_machine.add_node(node)
+            state_machine.prepare()
+            ret = state_machine.dump()
+            session.current_node = ret["current_node"]
+            session.nodes_process = ret["nodes_process"]
+            session.status = ret["status"]
+        else:
+            session = state_machine_session
+            state_machine = graph.StateMachine(session)
+            state_machine.load(session, session.node_process,
+                               session.current_node, session.status)
+            for node in self._nodes:
+                state_machine.add_node(node)
+        self._graphs[session.id] = state_machine
+        self._control_message[session.id] = None
+        return state_machine
+
+    @context.GuardianContext.new_action
+    def send(self, message):
+        """
+        发送消息至消息泵
+
+        :param Message message: 消息对象
+        :return: 无返回
+        :rtype: None
+        """
+        super(StateMachineExecutor, self).send(message)
+
+
+class StateMachineSession(object):
+    """
+    状态机session定义，一个状态机session，与状态机Guardian对象绑定，记录状态机运行信息（
+    如当前节点，节点运行状态，控制消息等），根据状态机session可完全回滚状态机运行状态
+    """
+
+    def __init__(self, id=None, params=None, current_node=None,
+                 nodes_process=None, status=None,
+                 control_message=None):
+        """
+        初始化方法
+
+        :param str id: 操作id
+        :param dict params: 自定义参数
+        :param current_node: 当前节点
+        :param dict nodes_process: 节点执行信息
+        :param str status: 状态机当前状态
+        :param dict control_message: 控制消息
+        """
+        self.id = id
+        self.params = params
+        self.current_node = current_node
+        self.nodes_process = nodes_process
+        self.status = status
+        self.control_message = control_message

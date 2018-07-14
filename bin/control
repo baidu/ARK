@@ -1,0 +1,55 @@
+#!/bin/bash  
+
+VERSION="1.0.0.1"
+BUILD_TIME="2018-07-04"
+
+SCRIPT_PATH="$(cd $(dirname "$0"); pwd)"
+SCRIPT_NAME="$(basename "$0")"
+cd ${SCRIPT_PATH} || exit 1
+
+#### include files
+source $(dirname ${SCRIPT_PATH})/bin/control.conf || exit 1
+source ${BIN_DIR}/control.inc  || exit 1
+source ${BIN_DIR}/control.func || exit 1
+
+prepare
+prepare_env
+clean_log
+
+INTERFACE=$1
+shift
+
+case "$INTERFACE" in
+    start|stop|restart|status|monitor|healthcheck)
+        echo -e "running:      [${PROC_NAME}] ${INTERFACE}" 
+        ${INTERFACE}
+        RET=$?
+        STA=`cat ${BIN_DIR}/control.conf | grep "^AOS_" | grep $RET 2>/dev/null`
+        echo -e "return value: ${RET} ($STA)"
+        exit ${RET}
+        ;;
+    reload)
+        if [ -z "$*" ];then
+            RET=1
+            STA=`cat ${BIN_DIR}/control.conf | grep "^AOS_" | grep $RET 2>/dev/null`
+            echo -e "running:      [${PROC_NAME}] ${INTERFACE}"
+            echo -e "return value: ${RET} ($STA)"
+            exit ${RET}
+        else
+            RELOAD_PARA=$*
+            echo -e "running:      [${PROC_NAME}] ${INTERFACE} ${RELOAD_PARA}"
+            if [ "${RELOAD_PARA}" == "-t connection" ]; then
+                python ${BIN_DIR}/connection.py < ${BIN_DIR}/../beejson/connection.json > ${CNF_DIR}/connection.conf
+            else
+                ${INTERFACE} ${RELOAD_PARA}
+            fi
+            RET=$?
+            STA=`cat ${BIN_DIR}/control.conf | grep "^AOS_" | grep $RET 2>/dev/null`
+            echo -e "return value: ${RET} ($STA)"
+            exit ${RET}
+        fi
+        ;;
+    *)
+        exit ${AOS_ERR}
+        ;;
+esac
