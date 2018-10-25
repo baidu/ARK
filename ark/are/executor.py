@@ -18,6 +18,7 @@ from are import context
 from are import framework
 from are import log
 from are import exception
+from are import stage
 
 
 class BaseExecFuncSet(object):
@@ -239,8 +240,8 @@ class StateMachineExecutor(MultiProcessExecutor):
         """
         super(StateMachineExecutor, self).__init__(process_count)
         self._nodes = nodes
-        self._concerned_message_list = ["IDLE_MESSAGE", "DECIDED_MESSAGE",
-                                        "CONTROL_MESSAGE"]
+        self._concerned_message_list.append("CONTROL_MESSAGE")
+
         self._graphs = {}
         manager = multiprocessing.Manager()
         self._control_message = manager.dict()
@@ -264,7 +265,7 @@ class StateMachineExecutor(MultiProcessExecutor):
         :return: 无返回
         :rtype: None
         """
-        state_machine = self.__create_state_machine(message)
+        state_machine = self._create_state_machine(message, self._nodes)
         # 状态机启动
         self.graph_start(state_machine)
 
@@ -280,12 +281,21 @@ class StateMachineExecutor(MultiProcessExecutor):
         session = state_machine.session
         while True:
             try:
-                control_message = copy.deepcopy(
+                control = copy.deepcopy(
                     self._control_message[session.id])
             except KeyError:
+                control = None
+            if control is not None:
+                # 状态机第一次处理控制消息或控制消息为最新还没被处理
+                if session.last_control_id is None \
+                        or session.last_control_id != control['control_id']:
+                    control_message = copy.deepcopy(control['message'])
+                    session.last_control_id = control['control_id']
+                else:
+                    control_message = None
+            else:
                 control_message = None
             session.control_message = control_message
-            self._control_message[session.id] = None
 
             #第一次运行的状态机，记录第一个节点信息
             if state_machine.status == state_machine.Status.INITED:
@@ -308,15 +318,17 @@ class StateMachineExecutor(MultiProcessExecutor):
                     log.info("state machine run state:{}".format(session.id))
                     todo_params = state_machine.dump()
                     todo_node = todo_params["current_node"]
+
                     state_machine.run_next()
                     finished_params = state_machine.dump()
                     session.status = finished_params["status"]
-                    session.current_node = finished_params["current_node"]
+                    #状态机Session的current_node为节点，而不再是节点的名称
+                    session.current_node = state_machine.get_node(finished_params["current_node"])
                     session.nodes_process = copy.copy(
                         finished_params["nodes_process"])
                     session.nodes_process[session.current_node] = True
                     current_node = session.current_node if \
-                        session.current_node != "ARK_NODE_END" else None
+                        session.current_node.name != "ARK_NODE_END" else None
                     params = {
                         "session": session,
                         "finished_node": todo_node,
@@ -326,7 +338,9 @@ class StateMachineExecutor(MultiProcessExecutor):
                     notice = framework.OperationMessage(
                         "STATE_COMPLETE_MESSAGE",
                         str(session.id), params)
-                    self._result_queue.put(notice)
+                    if todo_node != current_node or session.reset_flush(): #节点变更或业务方指定持久化Session
+                        self._result_queue.put(notice)
+
                 except Exception as e:
                     log.warning("graph run exception:{}".format(e))
                     log.warning("err:{}".format(traceback.format_exc()))
@@ -337,11 +351,8 @@ class StateMachineExecutor(MultiProcessExecutor):
         del self._control_message[session.id]
         log.info(
             "state machine run finished, operationId:{}".format(session.id))
-        message = framework.OperationMessage(
-            "COMPLETE_MESSAGE", str(session.id), session.__dict__)
-        self._result_queue.put(message)
 
-    def __create_state_machine(self, message):
+    def _create_state_machine(self, message, nodes):
         """
         创建状态机。新建时创建，实例迁移时重新加载
 
@@ -357,7 +368,7 @@ class StateMachineExecutor(MultiProcessExecutor):
             session = StateMachineSession(id=message.operation_id,
                                           params=message.params)
             state_machine = graph.StateMachine(session)
-            for node in self._nodes:
+            for node in nodes:
                 state_machine.add_node(node)
             state_machine.prepare()
             ret = state_machine.dump()
@@ -367,10 +378,15 @@ class StateMachineExecutor(MultiProcessExecutor):
         else:
             session = state_machine_session
             state_machine = graph.StateMachine(session)
-            state_machine.load(session, session.node_process,
-                               session.current_node, session.status)
-            for node in self._nodes:
-                state_machine.add_node(node)
+            state_machine.load(session, session.nodes_process,
+                               session.current_node.name, session.status)
+            #状态机的current_node必须为持久化至Session中的current_node
+            for node in nodes:
+                if node.name == session.current_node.name:
+                    state_machine.add_node(session.current_node)
+                else:
+                    state_machine.add_node(node)
+
         self._graphs[session.id] = state_machine
         self._control_message[session.id] = None
         return state_machine
@@ -387,7 +403,7 @@ class StateMachineExecutor(MultiProcessExecutor):
         super(StateMachineExecutor, self).send(message)
 
 
-class StateMachineSession(object):
+class StateMachineSession(context.FlushFlag):
     """
     状态机session定义，一个状态机session，与状态机Guardian对象绑定，记录状态机运行信息（
     如当前节点，节点运行状态，控制消息等），根据状态机session可完全回滚状态机运行状态
@@ -395,7 +411,7 @@ class StateMachineSession(object):
 
     def __init__(self, id=None, params=None, current_node=None,
                  nodes_process=None, status=None,
-                 control_message=None):
+                 control_message=None, last_control_id=None):
         """
         初始化方法
 
@@ -405,6 +421,8 @@ class StateMachineSession(object):
         :param dict nodes_process: 节点执行信息
         :param str status: 状态机当前状态
         :param dict control_message: 控制消息
+        :param list handle_list: stage处理结果
+        :param str last_control_id: 控制消息id
         """
         self.id = id
         self.params = params
@@ -412,3 +430,5 @@ class StateMachineSession(object):
         self.nodes_process = nodes_process
         self.status = status
         self.control_message = control_message
+        self.handle_list = []
+        self.last_control_id = last_control_id

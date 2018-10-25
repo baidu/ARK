@@ -84,3 +84,10 @@ class ENodeExist(Exception):
     节点已存在
     """
     pass
+
+
+class ControlFailed(Exception):
+    """
+    控制失败
+    """
+    pass

@@ -12,6 +12,7 @@ import copy
 from are import framework
 from are import exception
 from are import log
+from are import context
 
 
 class DecisionMaker(framework.BaseDecisionMaker):
@@ -39,7 +40,9 @@ class DecisionMaker(framework.BaseDecisionMaker):
             decided_message = self.decision_logic(message)
             self.send(decided_message)
         elif message.name == "COMPLETE_MESSAGE":
-            pass
+            # 任务完成需要清理状态机
+            guardian_context = context.GuardianContext.get_context()
+            guardian_context.delete_operation(message.operation_id)
         elif message.name in self._concerned_message_list:
             self.on_extend_message(message)
         else:
@@ -117,9 +120,11 @@ class StateMachineDecisionMaker(DecisionMaker):
     """
     def decision_logic(self, message):
         """
+        状态机决策逻辑，该函数直接根据Message生成决策完成的消息对象
 
-        :param message:
-        :return:
+        :param Message message: 感知完成的消息对象
+        :return: 决策完成的消息对象
+        :rtype: Message
         """
         decided_message = framework.OperationMessage(
             "DECIDED_MESSAGE", message.operation_id, message.params)

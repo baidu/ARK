@@ -152,17 +152,12 @@ class BaseGraph(object):
         :rtype: Node引用
         :raise EUnknownNode: 未知节点
         """
-        ret = None
         for node in self._nodes:
             if node.name == node_name:
-                ret = node
-                break
-            else:
-                continue
-        if not ret:
-            raise exception.EUnknownNode("node:{} unknown".format(node_name))
-        else:
-            return ret
+                return node
+
+        raise exception.EUnknownNode("node:{} unknown".format(node_name))
+
 
     def prepare(self):
         """

@@ -22,9 +22,10 @@
 * ``sensor`` 感知器模块，提供常见感知模型的实现
 * ``decision`` 决策器模块，提供常见决策模型的实现
 * ``executor`` 执行器模块，提供常见执行模型的实现
+* ``stage`` 包含了分级策略的描述及具体流程
 """
 __version = '1.0.0'
 __all = ['client', 'common', 'config', 'exception', 'graph',
          'loader', 'lock', 'log', 'server', 'framework', 'context',
-         'sensor', 'decision', 'executor', ]
+         'sensor', 'decision', 'executor', 'stage', ]
 

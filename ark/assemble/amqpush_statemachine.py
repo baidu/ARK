@@ -10,7 +10,7 @@
 from are import decision
 from are import executor
 from are import framework
-from assemble.sensor.amq_sensor import MqPushCallbackSensor
+from component.amq_sensor import MqPushCallbackSensor
 
 
 class AmqPushStateMachineGuardian(framework.GuardianFramework):

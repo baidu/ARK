@@ -68,21 +68,29 @@ class GuardianConfig(object):
         cls.load_remote_env()
 
     @classmethod
-    def get(cls, key):
+    def get(cls, key, default=None):
         """
-        获取key值
+        获取指定的配置项，如果配置项key不存在，则根据传入的default的不同：
 
-        :param str key: key
-        :return: key对应的值
+        * 传入的default为非None，则会设置该配置项的值为default。
+        * 传入的default为None，则触发异常。
+
+        :param str key: 需要获取的配置项的key
+        :param str default: 配置项的默认值
+
+        :return: 配置项的值
         :rtype: str
         :raises KeyError: key错误异常
         """
+        if not cls.has(key):
+            if default is not None:
+                cls.__conf[key] = default
         return cls.__conf[key]
 
     @classmethod
     def set(cls, mapping):
         """
-        设置值，增量
+        设置配置项的名值对
 
         :param dict mapping: 配置值kv对
         :return: 无返回
@@ -103,10 +111,22 @@ class GuardianConfig(object):
     @classmethod
     def delete(cls, key):
         """
-        删除key
+        删除指定的配置项
 
-        :param str key: 要删除的key
+        :param str key: 要删除的配置项的key
         :return: 无返回
         :rtype: None
+        :raises KeyError: key错误异常
         """
         del cls.__conf[key]
+
+    @classmethod
+    def has(cls, key):
+        """
+        判断key是否存在
+
+        :param str key: 要判断的key
+        :return: 存在（True）/ 不存在（False）
+        :rtype: bool
+        """
+        return key in cls.__conf

@@ -14,6 +14,7 @@
 """
 import time
 import traceback
+import copy
 
 from are import config
 from are import context
@@ -25,7 +26,7 @@ from are.state_service import ArkServer
 
 
 EXECUTOR_OPERATION_ID = "EXECUTOR_OPERATION_ID"
-
+GUARDIAN_ID_NAME = "GUARDIAN_ID"
 
 class Message(object):
     """
@@ -369,7 +370,7 @@ class GuardianFramework(MessagePump):
         :raises EFailedRequest: 状态服务请求异常
         """
         config.GuardianConfig.load_config()
-        guardian_id = config.GuardianConfig.get("GUARDIAN_ID")
+        guardian_id = config.GuardianConfig.get(GUARDIAN_ID_NAME)
         guardian_root_path = "/{}".format(guardian_id)
         guardian_client_path = "{}/alive_clients".format(guardian_root_path)
         context_path = guardian_root_path + "/context"
@@ -418,11 +419,29 @@ class GuardianFramework(MessagePump):
         :rtype: None
         """
         self._is_leader = True
+        self._stop_tag = False
         self._context = context.GuardianContext.load_context()
+        MessagePump._message_queue = self._context.message_list
+        self._recover_executing_message()
         self._context.update_lock(True)
         for listener in self._listener_list:
             listener.bind_pump(self)
             listener.active()
+    
+    def _recover_executing_message(self):
+        for operation in self._context.operations.itervalues():
+            if operation.status != "FINISH":
+                operation_id = operation.operation_id
+                ret = self._context.is_operation_id_in_message_list(operation_id)
+                if not ret:
+                    name = "DECIDED_MESSAGE"
+                    params_cp = operation.operation_params
+                    message = OperationMessage(name, operation_id, copy.deepcopy(params_cp))
+                    log.info("recover_message operation_id:{}".format(
+                        operation_id))
+                    self._context.message_list.append(message)
+
+
 
     def release_leader(self):
         """
@@ -434,6 +453,7 @@ class GuardianFramework(MessagePump):
         for listener in self._listener_list:
             listener.inactive()
         self._is_leader = False
+        self._stop_tag = True
         self._context.update_lock(False)
 
     def on_persistence(self):

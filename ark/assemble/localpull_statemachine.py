@@ -10,7 +10,7 @@
 from are import decision
 from are import executor
 from are import framework
-from assemble.sensor.local_sensor import LocalCallbackSensor
+from component.local_sensor import LocalCallbackSensor
 
 
 class LocalPullStateMachineGuardian(framework.GuardianFramework):

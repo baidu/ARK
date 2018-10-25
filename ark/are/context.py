@@ -13,6 +13,7 @@
 import json
 import pickle
 import time
+import copy
 
 from are import config
 from are.client import ESClient
@@ -21,9 +22,10 @@ from are.common import Singleton
 from are import exception
 from are import log
 
-CONTEXT_PATH = "/{}/context"
-GUARDIAN_ID = "GUARDIAN_ID"
 
+CONTEXT_PATH = "/{}/context"
+GUARDIAN_ID_NAME = "GUARDIAN_ID"
+CONTEXT_PATH_NAME = "CONTEXT_PATH"
 
 class GuardianContext(Singleton):
     """
@@ -55,8 +57,9 @@ class GuardianContext(Singleton):
         :return: context对象
         :rtype: GuardianContext
         """
-        context_path = CONTEXT_PATH.format(
-            config.GuardianConfig.get(GUARDIAN_ID))
+        context_path_base = config.GuardianConfig.get(CONTEXT_PATH_NAME, CONTEXT_PATH)
+        context_path = context_path_base.format(
+            config.GuardianConfig.get(GUARDIAN_ID_NAME))
         data = ZkClient().get_data(context_path)
         log.debug("load context from zookeeper success")
         guardian_context = pickle.loads(data) if data else GuardianContext()
@@ -75,7 +78,7 @@ class GuardianContext(Singleton):
                  持久化。
 
         """
-        self.__guardian_id = config.GuardianConfig.get(GUARDIAN_ID)
+        self.__guardian_id = config.GuardianConfig.get(GUARDIAN_ID_NAME)
         self.message_list = []
         self.operations = {}
         self.extend = {}
@@ -93,7 +96,8 @@ class GuardianContext(Singleton):
             log.error("current guardian instance no privilege to save context")
             raise exception.EInvalidOperation(
                 "current guardian instance no privilege to save context")
-        context_path = CONTEXT_PATH.format(self.__guardian_id)
+        context_path_base = config.GuardianConfig.get(CONTEXT_PATH_NAME, CONTEXT_PATH)
+        context_path = context_path_base.format(self.__guardian_id)
         ZkClient().save_data(context_path, pickle.dumps(self))
         log.info("save context success")
 
@@ -217,7 +221,8 @@ class GuardianContext(Singleton):
                         message.operation_id)
                 except KeyError:
                     operation = Operation(
-                        message.operation_id, message.params)
+                    # 此处使用深拷贝，防止后续处理中造成环形引用
+                        message.operation_id, copy.deepcopy(message.params))
                     guardian_context.create_operation(
                         message.operation_id, operation)
                 operation.append_period(message.name)
@@ -276,16 +281,30 @@ class GuardianContext(Singleton):
                 finished_node = message.params["finished_node"]
                 current_node = message.params["current_node"]
                 timestamp = message.params["timestamp"]
+                session = message.params["session"]
                 if current_node:
                     operation.add_action(current_node)
                 if finished_node:
                     operation.update_action(
                         finished_node, "FINISHED", timestamp)
+                if session:
+                    operation.update_session(session)
+
+                # 状态机节点持久化
+                guardian_context.save_context()
             else:
                 pass
             ret = func(send_obj, message)
             return ret
         return wrapper
+
+    def is_operation_id_in_message_list(self, operation_id):
+        for message in self.message_list:
+            if message.name != "IDLE_MESSAGE" \
+                and message.operation_id == operation_id:
+                return True
+        return False
+        
 
 
 class Operation(object):
@@ -365,15 +384,20 @@ class Operation(object):
         :return: 无返回
         :rtype: None
         """
-        try:
-            ESClient("ark", "operation").put_data(self.operation_id, json.dumps(
-                self, default=lambda obj: obj.__dict__))
-        except Exception as e:
-            log.error("record operation err:{}".format(e))
-        else:
-            log.info("record action success, operation_id:{}".format(
-                self.operation_id))
+        # try:
+        #     ESClient("ark", "operation").put_data(self.operation_id, json.dumps(
+        #         self, default=lambda obj: obj.__dict__))
+        # except Exception as e:
+        #     log.error("record operation err:{}".format(e))
+        # else:
+        #     log.info("record action success, operation_id:{}".format(
+        #         self.operation_id))
 
+    def update_session(self, session):
+        """
+        状态及处理完一个节点之后，更新session
+        """
+        self.session = session
 
 class Periods(object):
     """
@@ -484,3 +508,44 @@ class Action(object):
         self.status = status or "CREATE"
         self.startTime = start_time or int(time.time())
         self.endTime = end_time or 2147483647
+
+
+class FlushFlag(object):
+    """
+    刷新标记，提供一系列用于上下文刷新控制的函数支持
+    """
+    def get_flush(self):
+        """
+        获取标记判断是否需要进行flush
+        :return: flag
+        :rtype: bool
+        """
+        self._flush_flag = self._flush_flag if hasattr(self, "_flush_flag") else False
+        return self._flush_flag
+
+    def set_flush(self, flag):
+        """
+        设置标记判断是否需要进行flush
+        :param bool flag: 是否需要进行刷新
+        :return: 无返回
+        :rtype: None
+        """
+        self._flush_flag = flag
+
+    def flush(self):
+        """
+        设置标记以进行flush
+        :return: 无返回
+        :rtype: None
+        """
+        self._flush_flag = True
+
+    def reset_flush(self):
+        """
+        标记完成flush，同时返回之前的标记
+        :return: flag
+        :rtype: bool
+        """
+        flag = self.get_flush()
+        self._flush_flag = False
+        return flag

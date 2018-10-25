@@ -10,7 +10,7 @@
 from are import decision
 from are import executor
 from are import framework
-from assemble.sensor.es_sensor import EsCallbackSensor
+from component.es_sensor import EsCallbackSensor
 
 
 class EsPullKeyMappingGuardian(framework.GuardianFramework):
