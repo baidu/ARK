@@ -12,4 +12,4 @@
 * ``assemble`` 基于ark框架和一些开源组件实现的可直接使用的Guardian
 """
 __version = '1.0.0'
-__all = ['are', 'assemble', 'opal', ]
+__all = ['are', 'assemble', 'opal', 'component']
