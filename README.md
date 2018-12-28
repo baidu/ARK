@@ -20,7 +20,7 @@ ARK提供了如下功能以解决这些问题：
 
 #### 设计理念可以参考：
 * [ARK Wiki](https://github.com/baidu/ARK/wiki)
-  * 框架提供的基础能力（ARKv0.1）：[圆转如意——事件驱动的运维操作执行](https://github.com/baidu/ARK/wiki/%E5%9C%86%E8%BD%AC%E5%A6%82%E6%84%8F%E2%80%94%E2%80%94%E4%BA%8B%E4%BB%B6%E9%A9%B1%E5%8A%A8%E7%9A%84%E8%BF%90%E7%BB%B4%E6%93%8D%E4%BD%9C%E6%89%A7%E8%A1%8C)
+  * 框架基础能力（ARKv0.1）：[圆转如意——事件驱动的运维操作执行](https://github.com/baidu/ARK/wiki/%E5%9C%86%E8%BD%AC%E5%A6%82%E6%84%8F%E2%80%94%E2%80%94%E4%BA%8B%E4%BB%B6%E9%A9%B1%E5%8A%A8%E7%9A%84%E8%BF%90%E7%BB%B4%E6%93%8D%E4%BD%9C%E6%89%A7%E8%A1%8C)
   * 分级执行能力（ARKv0.2）：[步步为营——运维中的“分级”](https://github.com/baidu/ARK/wiki/%E6%AD%A5%E6%AD%A5%E4%B8%BA%E8%90%A5%E2%80%94%E2%80%94%E8%BF%90%E7%BB%B4%E4%B8%AD%E7%9A%84%E2%80%9C%E5%88%86%E7%BA%A7%E2%80%9D)
   * 并发处理能力（ARKv0.5）：[齐心协力——高效的运维操作执行](https://github.com/baidu/ARK/wiki/%E9%BD%90%E5%BF%83%E5%8D%8F%E5%8A%9B%E2%80%94%E2%80%94%E9%AB%98%E6%95%88%E7%9A%84%E8%BF%90%E7%BB%B4%E6%93%8D%E4%BD%9C%E6%89%A7%E8%A1%8C)
 
