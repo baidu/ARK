@@ -451,13 +451,9 @@ class Logger(object):
             print "LOGFATAL: Parse log file config %s error, use default config: " \
                   "%s," % (log_conf, traceback.format_exc())
             # 日志配置加载失败，使用默认配置
-            h_defalut = LimitTimedRotatingFileHandler(
-                Logger._log_root + "/run.log", when="D",
-                interval=1, maxBytes=200 * 1024 * 1024,
-                backupCount=7, encoding="UTF-8")
+            h_defalut = logging.StreamHandler()
             formatter = logging.Formatter(
-                "%(levelname)s.%(name)s %(asctime)s %(funcName)s@%(filename)s:%(lineno)d "
-                "%(processName)s.%(threadName)s%(message)s", "%y/%m/%d.%H:%M:%S.%f")
+                "%(levelname)s.%(name)s %(asctime)s %(processName)s.%(threadName)s%(message)s")
             h_defalut.setFormatter(formatter)
             h_defalut.setLevel(logging.INFO)
             # 初始化预定义的ARK框架的logger
