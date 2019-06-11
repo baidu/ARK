@@ -26,8 +26,11 @@ ARK框架从过去的运维处理中，抽象核心的模式固化成框架，�
 1. 面向状态运维，状态处理具有可复用性，并且流程动态生成，可以应对复杂业务变化，具有强大的扩展能力。
 2. 长流程分步执行，可在运行关键点处进行checkpoint，更好地解决了单实例故障时的可用性问题。
 """
-from are import exception
-from are import log
+import copy
+
+from ark.are import exception
+from ark.are import log
+from ark.are import context
 
 
 class BaseGraph(object):
@@ -158,7 +161,6 @@ class BaseGraph(object):
 
         raise exception.EUnknownNode("node:{} unknown".format(node_name))
 
-
     def prepare(self):
         """
         状态机创建之后初次检查, 并设置当前状态节点
@@ -243,7 +245,7 @@ class BaseGraph(object):
                 self.run_next()
             except Exception as e:
                 self._status = self.Status.FAILED
-                raise e
+                log.r(e, "start fail in run_next")
 
     def load(self, session, node_process, current_node, status):
         """
@@ -274,95 +276,6 @@ class BaseGraph(object):
             "nodes_process": self._nodes_process,
             "session": self._session}
         return attribute
-
-
-class StateMachine(BaseGraph):
-    """
-    状态机运行模式
-    """
-
-    def run_next(self):
-        """
-        进行一次状态轮转
-
-        .. Note:: 状态机模型中，每个状态处理完成后需要返回一个确定的状态，可直接进行处理；若返回的状态不存在，直接抛出异常
-
-        :return: 无返回
-        :rtype: None
-        :raise ECheckFailed: 检查失败
-        :raise EUnknownNode: 未知节点
-        """
-        state = self.get_node(self._current_node)
-        if not state.reentrance and self._nodes_process[state.name]:
-            raise exception.ECheckFailed(
-                "node:{} is finished and not reentrance".format(state.name))
-        ret = state.check(self._session, self._current_node,
-                          self._nodes_process)
-        log.info("node {} check ret:{}".format(self._current_node, ret))
-        if ret:
-            self._nodes_process[state.name] = True
-            current_state = state.process(self._session, self._current_node,
-                                          self._nodes_process)
-            log.info("node process finished, next node:{}".format(
-                current_state))
-            if current_state == self._ARK_NODE_END:
-                self._current_node = current_state
-                self._status = self.Status.FINISHED
-                return
-            elif current_state not in self._nodes_process:
-                raise exception.EUnknownNode(
-                    "return state[{}] unkown".format(current_state))
-            else:
-                self._current_node = current_state
-        else:
-            raise exception.ECheckFailed(
-                "node:{} check failed".format(state.name))
-
-
-class DependencyFlow(BaseGraph):
-    """
-    工作流运行模式
-    """
-    def run_next(self):
-        """
-        进行一次状态轮转
-
-        .. Note:: 工作流模型中，每个状态处理完成后，下一次需要轮转的状态是不确定的（或者只提供下一个建议执行的状态），因此使用工作流模型，需要自己定义各个状态的 ``check``方法；
-        状态处理完成后启动对各状态的检查，检查通过的状态，进入处理阶段。
-
-        .. Note:: 在某个状态完成后，会从其返回的建议的下一个运行状态开始遍历（如未返回建议状态，则从状态列表中此状态的下一个开始），以提高命中效率
-
-        :return: 无返回
-        :rtype: None
-        """
-        node = self.get_node(self._current_node)
-        index = self._nodes.index(node)
-        index_list = range(index, len(self._nodes))
-        index_list.extend(range(0, index))
-        for i in index_list:
-            node = self._nodes[i]
-            if not node.reentrance and self._nodes_process[node.name]:
-                continue
-            else:
-                ret = node.check(self._session, self._current_node,
-                                 self._nodes_process)
-                log.info("node {} check ret:{}".format(self._current_node, ret))
-                if ret:
-                    self._nodes_process[node.name] = True
-                    current_node = node.process(
-                        self._session, self._current_node, self._nodes_process)
-                    log.info("node process finished, suggest next "
-                             "node:{}".format(current_node))
-                    if current_node == self._ARK_NODE_END:
-                        self._status = self.Status.FINISHED
-                    elif current_node not in self._nodes_process:
-                        self._current_node = self._nodes[
-                            (i + 1) % len(self._nodes)].name
-                    else:
-                        self._current_node = current_node
-                    return
-                else:
-                    continue
 
 
 class Node(object):
@@ -407,7 +320,7 @@ class Node(object):
     def check(self, session, current_node, nodes_process):
         """
         节点检查接口
-        
+
         :param object session: 状态机运行信息
         :param str current_node: 当前节点
         :param dict nodes_process: 节点运行情况
@@ -420,7 +333,7 @@ class Node(object):
     def process(self, session, current_node, nodes_process):
         """
         节点处理接口
-        
+
         :param object session: 状态机运行信息
         :param str current_node: 当前节点
         :param dict nodes_process: 节点运行情况
@@ -446,3 +359,267 @@ class State(Node):
         :rtype: bool
         """
         return self.name == current_node
+
+
+class StateMachine(BaseGraph):
+    """
+    状态机运行模式。状态机模式是一种无并发场景下的流程执行引擎，适用于管理单个运维实体的状态变迁。
+
+    .. Note:: 用状态机模式来管理并发流程，或者是任务批次执行流程也是可以的，但是需要引入较多的限定，和更复杂的流程阶段控制。
+
+    """
+
+    def run_next(self):
+        """
+        进行一次状态轮转
+
+        .. Note:: 状态机模型中，每个状态处理完成后需要返回一个确定的状态，可直接进行处理；若返回的状态不存在，直接抛出异常
+
+        :return: 无返回
+        :rtype: None
+        :raise ECheckFailed: 检查失败
+        :raise EUnknownNode: 未知节点
+        """
+        state = self.get_node(self._current_node)
+        if not state.reentrance and self._nodes_process[state.name]:
+            raise exception.ECheckFailed(
+                "node:{} is finished and not reentrance".format(state.name))
+        ret = state.check(self._session, self._current_node,
+                          self._nodes_process)
+        log.i("node {} check ret:{}".format(self._current_node, ret))
+        if ret:
+            self._nodes_process[state.name] = True
+            current_state = state.process(self._session, self._current_node,
+                                          self._nodes_process)
+            log.i("node process finished, next node:{}".format(
+                current_state))
+            if current_state == self._ARK_NODE_END:
+                self._current_node = current_state
+                self._status = self.Status.FINISHED
+                return
+            elif current_state not in self._nodes_process:
+                raise exception.EUnknownNode(
+                    "return state[{}] unkown".format(current_state))
+            else:
+                self._current_node = current_state
+        else:
+            raise exception.ECheckFailed(
+                "node:{} check failed".format(state.name))
+
+
+class DependencyFlow(BaseGraph):
+    """
+    工作流运行模式
+    """
+    def run_next(self):
+        """
+        进行一次状态轮转
+
+        .. Note:: 工作流模型中，每个状态处理完成后，下一次需要轮转的状态是不确定的（或者只提供下一个建议执行的状态），因此使用工作流模型，需要自己定义各个状态的 ``check``方法；
+        状态处理完成后启动对各状态的检查，检查通过的状态，进入处理阶段。
+
+        .. Note:: 在某个状态完成后，会从其返回的建议的下一个运行状态开始遍历（如未返回建议状态，则从状态列表中此状态的下一个开始），以提高命中效率
+
+        :return: 无返回
+        :rtype: None
+        """
+        node = self.get_node(self._current_node)
+        index = self._nodes.index(node)
+        index_list = range(index, len(self._nodes))
+        index_list.extend(range(0, index))
+        for i in index_list:
+            node = self._nodes[i]
+            if not node.reentrance and self._nodes_process[node.name]:
+                continue
+            else:
+                ret = node.check(self._session, self._current_node,
+                                 self._nodes_process)
+                log.i("node {} check ret:{}".format(self._current_node, ret))
+                if ret:
+                    self._nodes_process[node.name] = True
+                    current_node = node.process(
+                        self._session, self._current_node, self._nodes_process)
+                    log.i("node process finished, suggest next "
+                             "node:{}".format(current_node))
+                    if current_node == self._ARK_NODE_END:
+                        self._status = self.Status.FINISHED
+                    elif current_node not in self._nodes_process:
+                        self._current_node = self._nodes[
+                            (i + 1) % len(self._nodes)].name
+                    else:
+                        self._current_node = current_node
+                    return
+                else:
+                    continue
+
+
+class PersistedStateMachineSession(context.FlushFlag):
+    """
+    状态机session定义，一个状态机session，与状态机对象绑定，记录状态机运行信息（
+    如当前节点，节点运行状态，控制消息等），根据状态机session可完全恢复中断的状态机运行状态
+
+    .. Note:: session中的控制消息（control_message）应在处理完成之后被清理，否则会造成重复触发
+    """
+
+    def __init__(self, id=None, params=None, current_node=None,
+                 nodes_process=None, status=None,
+                 control_message=None, last_control_id=None):
+        """
+        初始化方法
+
+        :param str id: 操作id
+        :param dict params: 自定义参数
+        :param current_node: 当前节点
+        :param dict nodes_process: 节点执行信息
+        :param str status: 状态机当前状态
+        :param dict control_message: 控制消息
+        :param list handle_list: stage处理结果
+        :param str last_control_id: 控制消息id
+        """
+        self.id = id
+        self.params = params
+        self.current_node = current_node
+        self.nodes_process = nodes_process
+        self.status = status
+        self.control_message = control_message
+        self.handle_list = []
+        self.last_control_id = last_control_id
+
+
+class PersistedStateMachine(StateMachine):
+    """
+    提供具备持久化能力的状态机模式实现。具体的持久化方式由调用者实现。
+
+    .. Note:: 持久化状态机依赖PersistedStateMachineSession管理session，其中的控制消息（control_message）应在处理完成之后被清理，否则会造成重复触发
+    """
+
+    def set_helper(self, helper):
+        """
+        设置用于提供相应的持久化功能的工具类实现
+
+        :param PersistedHelper helper: 持久化工具类的实例
+        :return: 无返回
+        :rtype: None
+        """
+        self._helper = helper
+
+    def start(self):
+        """
+        带有持久化功能的状态机启动执行。状态机启动后，会根据每个节点执行的返回值，执行下一个节点，直到返回
+        结束或执行异常。在每个节点执行完成后，会向结果队列中发送消息，由主进程进行处理
+
+
+
+        :return: 无返回
+        :rtype: None
+        """
+        session = self.session
+        while True:
+            control_id, control_message = self._helper.get_control_message(session)
+            if control_id is not None:
+                # 状态机第一次处理控制消息或控制消息为最新还没被处理
+                if session.last_control_id is None \
+                        or session.last_control_id != control_id:
+                    control_message_cp = copy.deepcopy(control_message)
+                    session.last_control_id = copy.deepcopy(control_id)
+                else:
+                    control_message_cp = None
+            else:
+                control_message_cp = None
+
+            # session中的控制消息应在处理完成之后被清理
+            session.control_message = control_message_cp
+            if session.control_message is not None:
+                # 感知到控制消息后要强制持久化session，避免控制消息丢失
+                self._helper.persist(
+                    reason=PersistedStateMachineHelper.Reason.CONTROL,
+                    session=session,
+                    finished_name=None,
+                    next_name=None
+                )
+
+            # 第一次运行的状态机，记录第一个节点信息
+            if self.status == self.Status.INITED:
+                todo_params = self.dump()
+                todo_node_name = todo_params["current_node"]
+                self._helper.persist(
+                    reason=PersistedStateMachineHelper.Reason.STARTED,
+                    session=session,
+                    finished_name=None,
+                    next_name=todo_node_name
+                )
+                self.status = self.Status.RUNNING
+
+            if self.status == self.Status.RUNNING:
+                try:
+                    finished_node_name = self.dump()["current_node"]
+                    self.run_next()
+                    session.nodes_process[finished_node_name] = True
+
+                    finished_state = self.dump()
+                    todo_node_name = finished_state["current_node"]
+                    session.status = finished_state["status"]
+
+                    if self.status == self.Status.FINISHED:
+                        session.current_node = None
+                    else:
+                        session.current_node = self. \
+                            get_node(todo_node_name)
+
+                    session.nodes_process = copy.copy(
+                        finished_state["nodes_process"])
+
+                    # 节点变更或需要强制刷新
+                    if finished_node_name != todo_node_name or session.reset_flush():
+                        self._helper.persist(
+                            reason=PersistedStateMachineHelper.Reason.NODE_CHANGED,
+                            session=session,
+                            finished_name=finished_node_name,
+                            next_name=todo_node_name
+                        )
+
+                except Exception as e:
+                    self.status = self.Status.FAILED
+                    log.r(e, "start fail in running")
+            else:
+                break
+
+
+class PersistedStateMachineHelper(object):
+    """
+    状态机持久化工具类，用来提供状态机持久化所需的接口扩展。
+
+    """
+    class Reason(object):
+        """
+        持久化的原因
+
+        """
+        CONTROL = 0
+        STARTED = 1
+        NODE_CHANGED = 2
+
+    def get_control_message(self, session):
+        """
+        获取当前是否有控制消息需要处理。如果没有，则应返回None, None
+
+        :param object session: 状态机的session
+        :return: 控制消息ID，控制消息
+        :rtype: str, object
+        """
+        raise exception.ENotImplement("function is not implement")
+
+    def persist(self, session, message_name, finished_name, next_name):
+        """
+        提供必要的持久化实现
+
+        .. Note:: session中的控制消息应在处理完成之后被清理，否则会造成重复触发
+
+        :param object session: 状态机的session
+        :param str message_name: 状态机的session
+        :param str finished_name: 已经完成的节点名
+        :param str next_name: 下一个将处理的节点名
+        :return: 无返回
+        :rtype: None
+        """
+        raise exception.ENotImplement("function is not implement")

@@ -7,10 +7,10 @@
 """
 使用轮询本地文件进行感知的状态机Guardian
 """
-from are import decision
-from are import executor
-from are import framework
-from component.local_sensor import LocalCallbackSensor
+from ark.are import decision
+from ark.are import executor
+from ark.are import framework
+from ark.component.local_sensor import LocalCallbackSensor
 
 
 class LocalPullStateMachineGuardian(framework.GuardianFramework):

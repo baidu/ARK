@@ -9,10 +9,10 @@
 """
 import copy
 
-from are import framework
-from are import exception
-from are import log
-from are import context
+from ark.are import framework
+from ark.are import exception
+from ark.are import log
+from ark.are import context
 
 
 class DecisionMaker(framework.BaseDecisionMaker):
@@ -35,14 +35,12 @@ class DecisionMaker(framework.BaseDecisionMaker):
         :rtype: None
         :raises EUnknownEvent: 位置事件异常
         """
-        log.info("on decision message:{}".format(message.name))
+        log.i("on decision message:{}".format(message.name))
         if message.name == "SENSED_MESSAGE":
             decided_message = self.decision_logic(message)
             self.send(decided_message)
         elif message.name == "COMPLETE_MESSAGE":
-            # 任务完成需要清理状态机
-            guardian_context = context.GuardianContext.get_context()
-            guardian_context.delete_operation(message.operation_id)
+            pass
         elif message.name in self._concerned_message_list:
             self.on_extend_message(message)
         else:
@@ -98,7 +96,7 @@ class KeyMappingDecisionMaker(DecisionMaker):
         :rtype: Message
         :raises ETypeMismatch: 事件参数不匹配异常
         """
-        log.info("begin decision logic, message:{}".format(message.name))
+        log.i("begin decision logic, message:{}".format(message.name))
         operation_id = message.operation_id
         params = message.params
         if self._from_key in params \

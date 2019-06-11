@@ -15,20 +15,22 @@ import logging
 import logging.config
 import logging.handlers
 import os
+import sys
 import re
 import threading
 import time
+import types
+import traceback
 from logging import Handler
 from logging import LogRecord
 
 import config
-from are.common import Singleton
+from ark.are.exception import EMissingParam
 
 LOG_ROOT = "LOG_DIR"
 LOG_CONF_DIR = "LOG_CONF_DIR"
-LOG_MATRIX_ID = "MATRIX_CONTAINER_ID"
-LOG_OPERATION_ID = "OPERATION_ID"
-LOG_FRAMEWORKS = ("are", "framework", "opal", "extend",)
+LOG_NAME_ARK = "ARK"
+LOG_NAME_GUARDIAN = "GUARDIAN"
 
 
 class NullLogRecord(LogRecord):
@@ -56,7 +58,7 @@ class LockException(Exception):
     LOCK_FAILED = 1
 
 
-class LimitTimedRotatingFileHandler(logging.handlers.BaseRotatingHandler):
+class LimitTimedRotatingFileHandler(logging.handlers.TimedRotatingFileHandler):
     """
     扩展了滚动日志handler(BaseRotatingHandler)，支持同时对日志大小和时间进行限制:
     1.在日志按时间滚动的基础上，单个日志的大小不超过指定的大小;
@@ -416,75 +418,59 @@ class LimitTimedRotatingFileHandler(logging.handlers.BaseRotatingHandler):
 logging.handlers.LimitTimedRotatingFileHandler = LimitTimedRotatingFileHandler
 
 
-class LoggerContext(Singleton):
+class Logger(object):
     """
-    logger context，生成log handler
+    日志具体实现类，用户直接调用接口。
     """
 
-    def __init__(self):
-        """
-        初始化LOGContext，从ark环境变量和are.conf配置文件提取日志参数，如果用户没有显示配置则使用默认值。
-        """
-        env = config.GuardianConfig.get_all()
-        if LOG_CONF_DIR in env:
-            log_conf = env[LOG_CONF_DIR]
-        else:
-            log_conf = "../conf/"
-        self._log_conf = log_conf
-        if LOG_ROOT in env:
-            log_root = env[LOG_ROOT]
-        else:
-            log_root = "../log/"
-        self._log_root = log_root
-        if LOG_MATRIX_ID in env:
-            matrix_container_id = env["MATRIX_CONTAINER_ID"]
-            parts = matrix_container_id.split(".")
-            if len(parts) >= 2:
-                log_gid = parts[1]
-            else:
-                log_gid = "Wrong"
-        else:
-            log_gid = "None"
-        self.log_gid = log_gid
-        if LOG_OPERATION_ID in env:
-            log_oid = env[LOG_OPERATION_ID]
-        else:
-            log_oid = "None"
-        self.log_oid = log_oid
-        self._init_log()
+    _LOGGERS = dict()
+    _log_gid = ""
+    _log_oid = ""
 
-    def _init_log(self):
+    lv_map = {"INFO": logging.INFO,
+              "WARNING": logging.WARNING,
+              "DEBUG": logging.DEBUG,
+              "ERROR": logging.ERROR,
+              "CRITICAL": logging.CRITICAL,
+              "FATAL": logging.FATAL}
+
+    @staticmethod
+    def _conf_log():
         """
         加载文件log配置，创建分框架分级别的日志
         """
-        log_conf = self._log_conf + "log.conf"
-        if not os.path.exists(self._log_root):
-            os.makedirs(self._log_root)
+        Logger._log_conf = config.GuardianConfig.get(LOG_CONF_DIR, "../conf/")
+        Logger._log_root = config.GuardianConfig.get(LOG_ROOT, "../log/")
+        Logger._log_gid = config.GuardianConfig.get(config.GUARDIAN_ID_NAME, "UNKNOWN")
+        log_conf = Logger._log_conf + "log.conf"
+        if not os.path.exists(Logger._log_root):
+            os.makedirs(Logger._log_root)
         try:
             logging.config.fileConfig(log_conf)
-        except Exception as e:
-            print "LOGFATAL: Parse log file config %s error: %s," \
-                  " use default config" % (log_conf, e)
+        except:
+            print "LOGFATAL: Parse log file config %s error, use default config: " \
+                  "%s," % (log_conf, traceback.format_exc())
             # 日志配置加载失败，使用默认配置
             h_defalut = LimitTimedRotatingFileHandler(
-                self._log_root + "/run.log", when="D",
+                Logger._log_root + "/run.log", when="D",
                 interval=1, maxBytes=200 * 1024 * 1024,
                 backupCount=7, encoding="UTF-8")
             formatter = logging.Formatter(
-                "%(levelname)s %(asctime)s %(thread)d %(message)s")
+                "%(levelname)s.%(name)s %(asctime)s %(funcName)s@%(filename)s:%(lineno)d "
+                "%(processName)s.%(threadName)s%(message)s", "%y/%m/%d.%H:%M:%S.%f")
             h_defalut.setFormatter(formatter)
             h_defalut.setLevel(logging.INFO)
-            # 初始化预定义的顶层framework logger，基于类名的logger都是它们的子类，会被默认设置
-            for framework_name in LOG_FRAMEWORKS:
-                logger = logging.getLogger(framework_name)
-                logger.addHandler(h_defalut)
-                logger.setLevel(logging.DEBUG)
-            # 初始化用户main logger
-            logger = logging.getLogger("main")
-            logger.addHandler(h_defalut)
-            logger.setLevel(logging.DEBUG)
+            # 初始化预定义的ARK框架的logger
+            lg = logging.getLogger(LOG_NAME_ARK)
+            lg.addHandler(h_defalut)
+            lg.setLevel(logging.INFO)
+            # 初始化用户GUARDIAN的logger
+            lg = logging.getLogger(LOG_NAME_GUARDIAN)
+            lg.addHandler(h_defalut)
+            lg.setLevel(logging.DEBUG)
 
-    def level_convert(self, level_str):
+    @staticmethod
+    def _level_convert(level_str):
         """
         将字符串转换成日志级别
 
@@ -492,78 +478,42 @@ class LoggerContext(Singleton):
         :return: 日志级别
         :rtype: int
         """
-        if level_str == "INFO":
-            level = logging.INFO
-        elif level_str == "WARNING":
-            level = logging.WARNING
-        elif level_str == "DEBUG":
-            level = logging.DEBUG
-        elif level_str == "ERROR":
-            level = logging.ERROR
-        elif level_str == "CRITICAL":
-            level = logging.CRITICAL
-        elif level_str == "FATAL":
-            level = logging.FATAL
+
+        if level_str not in Logger.lv_map:
+            return logging.INFO
         else:
-            level = logging.INFO
-        return level
+            return Logger.lv_map[level_str]
 
-
-class LoggerFactory(Singleton):
-    """
-    Log 工厂类，用于创建Logger。
-    """
-    _LOGGERS = dict()
-    _CONTEXT = LoggerContext()
-
-    @staticmethod
-    def get_logger(cls):
+    def __new__(cls, *args, **kwargs):
         """
-        获取对应cls的Logger，如果不存在则新建。
+        构造方法
 
-        :param cls:  Logger作用类
-        :return: 用于日志打印的Logger
+        :param tuple args: 可变参数
+        :param dict kwargs: 关键字参数
         """
-        if cls not in LoggerFactory._LOGGERS:
-            LoggerFactory._init_logger(cls)
-        return LoggerFactory._LOGGERS.get(cls)
+        if len(cls._LOGGERS) == 0:
+            Logger._conf_log()
+        if "name" in kwargs:
+            name = kwargs["name"]
+        elif len(args) >= 1:
+            name = args[0]
+        else:
+            raise EMissingParam("logger init need name.")
 
-    @staticmethod
-    def _init_logger(cls):
-        """
-        针对不同类产生不同Logger，线程安全。
+        if name not in cls._LOGGERS:
+            lock = threading.RLock()
+            if lock.acquire():
+                logger = super(Logger, cls).__new__(cls, *args, **kwargs)
+                cls._LOGGERS[name] = logger
+                lock.release()
+                return logger
+        return cls._LOGGERS.get(name)
 
-        :param cls: Logger作用类
-        :return: 无返回值
-        """
-        lock = threading.RLock()
-        if lock.acquire():
-            logger = Logger(LoggerFactory._CONTEXT, cls)
-            LoggerFactory._LOGGERS[cls] = logger
-            lock.release()
-
-
-class Logger(object):
-    """
-    日志具体实现类，用户直接调用接口。
-    """
-
-    def __init__(self, context, cls):
+    def __init__(self, name):
         """
         初始化成员变量和logger，非框架类添加main前缀统一输出，框架类保持原名
         """
-        self._context = context
-        self._cls = cls
-        # 取出类名部分，如<class '__main__.abc'>转化为__main__.abc
-        cls_name = str(cls)[8:-2]
-        logger_name = "main" + "." + cls_name
-        parts = cls_name.split(".")
-        if len(parts) >= 1:
-            prefix = parts[0]
-            if prefix in LOG_FRAMEWORKS:
-                logger_name = cls_name
-        # 这里持有logger名称而不是logger对象，避免arkOjbect在pickle时失败
-        self._log_name = logger_name
+        self._log_name = name
 
     def tlog(self, level, text, *args):
         """
@@ -577,8 +527,8 @@ class Logger(object):
         :returns: 无返回
         :rtype: None
         """
-        texts, json_args = self._format_request(text, args)
         logger = logging.getLogger(self._log_name)
+        texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(level, texts, *json_args)
         else:
@@ -593,8 +543,8 @@ class Logger(object):
         :returns: 无返回
         :rtype: None
         """
-        texts, json_args = self._format_request(text, args)
         logger = logging.getLogger(self._log_name)
+        texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(logging.WARNING, texts, *json_args)
         else:
@@ -609,12 +559,16 @@ class Logger(object):
         :returns: 无返回
         :rtype: None
         """
-        texts, json_args = self._format_request(text, args)
         logger = logging.getLogger(self._log_name)
-        if len(json_args) > 0:
-            logger.log(logging.FATAL, texts, *json_args)
+        texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
+        if sys.exc_info()[0] is None:
+            ei = None
         else:
-            logger.log(logging.FATAL, texts)
+            ei = True
+        if len(json_args) > 0:
+            logger.log(logging.FATAL, texts, *json_args, exc_info=ei)
+        else:
+            logger.log(logging.FATAL, texts, exc_info=ei)
 
     def info(self, text, *args):
         """
@@ -625,8 +579,8 @@ class Logger(object):
         :returns: 无返回
         :rtype: None
         """
-        texts, json_args = self._format_request(text, args)
         logger = logging.getLogger(self._log_name)
+        texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(logging.INFO, texts, *json_args)
         else:
@@ -641,8 +595,8 @@ class Logger(object):
         :returns: 无返回
         :rtype: None
         """
-        texts, json_args = self._format_request(text, args)
         logger = logging.getLogger(self._log_name)
+        texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(logging.ERROR, texts, *json_args)
         else:
@@ -657,37 +611,34 @@ class Logger(object):
         :returns: 无返回
         :rtype: None
         """
-        texts, json_args = self._format_request(text, args)
         logger = logging.getLogger(self._log_name)
+        texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(logging.DEBUG, texts, *json_args)
         else:
             logger.log(logging.DEBUG, texts)
 
-    def tsetoid(self, level, text, oid='None', *args):
+    @staticmethod
+    def setoid(operation_id):
         """
-        本接口用于获得executor返回的operation_id，用户不需要调用
-
-        :param str oid: executor返回的operation_id，会更新到整个log的context后续打印
-        :param int level: 日志级别，支持字符串形式和logging本身级别
-        :param obj text: 要输出的文本信息，通过python字符串的%语法可以获得类似c语言printf的效果
-        :param args: 格式化字符串中占位符对应的变量值，如果变量是对象则打印成json
-        :returns: 无返回
+        设置opeartion-id，仅应在主线程中调用，且只有主线程才会输出opeartion-id
+        :param operation_id: 应设置的操作id
+        :return: 无返回
         :rtype: None
         """
-        self._context.log_oid = oid
-        if isinstance(level, basestring):
-            log_level = self._context.level_convert(level)
-        else:
-            log_level = level
-        texts, json_args = self._format_request(text, args)
-        logger = logging.getLogger(self._log_name)
-        if len(json_args) > 0:
-            logger.log(log_level, texts, *json_args)
-        else:
-            logger.log(log_level, texts)
+        Logger._log_oid = operation_id
 
-    def _deal_json(self, args):
+    @staticmethod
+    def clearoid():
+        """
+        清理掉已经设置的opeartion-id，仅应在主线程中调用
+        :return: 无返回
+        :rtype: None
+        """
+        Logger._log_oid = ""
+
+    @staticmethod
+    def _deal_json(args):
         """
         对传入不定参数进行整理，如果某个参数是对象类型，则将其转化为json格式，如果对象成员不可json化则显示其__dict__
         :param args: 任意数量和类型的变量
@@ -697,7 +648,8 @@ class Logger(object):
         result = []
         for arg in args:
             json_str = str(arg)
-            if self._is_dict_class(arg):
+            # 判断传入的参数的类型是否为一个对象，即来自class实例化，而非内置其它类型
+            if str(type(arg)).startswith("<class ") and hasattr(arg, "__dict__"):
                 try:
                     json_str = json.dumps(arg.__dict__)
                 except TypeError:
@@ -706,64 +658,60 @@ class Logger(object):
             result.append(json_str)
         return result
 
-    def _is_dict_class(self, obj):
+    def _format_request(self, level, text, args):
         """
-        判断传入的参数的类型是否为一个对象，即来自class实例化，而非内置其它类型
+        统一处理各种级别的用户日志打印请求，添加自定义的处理，目前有:
 
-        :param object: 任意类型的变量
-        :returns: 是否为对象
-        :rtype: bool
+        :param level: 设置的打印日志级别
+        :param text: 要输出的文本信息，通过python字符串的%语法可以获得类似c语言printf的效果
+        :param args: 格式化字符串中占位符对应的变量值，如果变量是对象则打印成json
+        :return texts: 整理过的输出信息
+        :return json_args: 整理过的列表列表，其中的对象为json形式
         """
-        type_str = str(type(obj))
-        if type_str.startswith("<class "):
-            if hasattr(obj, "__dict__"):
-                return True
-        return False
-
-    def _format_request(self, text, args):
-        """
-         统一处理各种级别的用户日志打印请求，添加自定义的处理，目前有:
-         1.添加类名[c:]
-         2.添加文件名[f:]和行号信息[l:]
-         3.将对象格式化为json，这里要求使用标准的logger("%s", obj)形式，obj是对象则转成json
-         4.添加guardian_id，日志中为[g:]节省空间
-         5.添加operation_id，日志中为[o:]节省空间，注意这个值会随命令执行不断改变，初始值为None
-
-         :param text: 要输出的文本信息，通过python字符串的%语法可以获得类似c语言printf的效果
-         :param args: 格式化字符串中占位符对应的变量值，如果变量是对象则打印成json
-         :return texts: 整理过的输出信息
-         :return json_args: 整理过的列表列表，其中的对象为json形式
-         """
-        call_stack = inspect.stack()
-        if self._cls:
-            cls_name = str(self._cls)[8:-2]
-            call_file = call_stack[2][1]
-            # 提取文件名
-            call_line = call_stack[2][2]
+        if threading.current_thread().name == "MainThread" and Logger._log_oid != "":
+            texts = "@%s.%s %s# %s" % (Logger._log_gid, Logger._log_oid, Logger._get_call_info(level), text)
         else:
-            print "none-------------------"
-            cls_name = None
-            call_stack = inspect.stack()
-            call_file = call_stack[3][1]
-            call_line = call_stack[3][2]
-        guardian_id = self._context.log_gid
-        paths = os.path.split(call_file)
-        if len(paths) == 2:
-            file_name = paths[1]
-        else:
-            file_name = call_file
-        texts = "[c:{}] [f:{}] [l:{}] [g:{}] [o:{}]: {}". \
-            format(cls_name, file_name, call_line, guardian_id,
-                   self._context.log_oid, text)
-        json_args = self._deal_json(args)
+            texts = "@%s %s# %s" % (Logger._log_gid, Logger._get_call_info(level), text)
+        json_args = Logger._deal_json(args)
         return texts, json_args
+
+    @staticmethod
+    def _formatvalue(value):
+        """
+        简化各种复杂类型的输出，如类、对象、方法等
+        """
+        if inspect.isclass(value):
+            return '=C{%s}' % value.__name__
+        if inspect.ismethod(value):
+            return '=M<%s.%s()>' % (value.im_class.__name__, value.__name__)
+        if inspect.isfunction(value):
+            return '=F<%s()>' % value.__name__
+        sc = str(value.__class__)
+        if sc.startswith("<class '"):
+            return '=I<%s>' % value.__class__.__name__
+        return '=' + repr(value)
+
+    @staticmethod
+    def _get_call_info(level):
+        """
+        输出调用日志打印的函数的函数名及形参、实参。仅当配置的日志打印级别为DEBUG时的情况下才会输出这些详细信息
+        """
+        frames = inspect.stack()
+        fr = frames[4][0]
+        args_pretty = inspect.formatargvalues(*(inspect.getargvalues(fr)), formatvalue=Logger._formatvalue)
+        filename, lineno, funcname, _, _ = inspect.getframeinfo(fr, -1)
+        filename = filename.split('/')[-1]
+        if level != logging.DEBUG and funcname != "<module>":
+            return '%s:%d/%s%s' % (filename, lineno, funcname, args_pretty)
+        else:
+            return '%s:%d/%s' % (filename, lineno, funcname)
 
 
 def info(message):
     """
     打印info级别日志
     """
-    logger = LoggerFactory.get_logger("info")
+    logger = Logger(LOG_NAME_GUARDIAN)
     logger.info(message)
 
 
@@ -771,7 +719,7 @@ def debug(message):
     """
     打印debug级别日志
     """
-    logger = LoggerFactory.get_logger("debug")
+    logger = Logger(LOG_NAME_GUARDIAN)
     logger.debug(message)
 
 
@@ -779,7 +727,7 @@ def error(message):
     """
     打印error级别日志
     """
-    logger = LoggerFactory.get_logger("error")
+    logger = Logger(LOG_NAME_GUARDIAN)
     logger.error(message)
 
 
@@ -787,14 +735,71 @@ def fatal(message):
     """
     打印fatal级别日志
     """
-    logger = LoggerFactory.get_logger("fatal")
+    logger = Logger(LOG_NAME_GUARDIAN)
     logger.fatal(message)
+
+
+def fatal_raise(e, message):
+    """
+    打印fatal级别日志
+    """
+    logger = Logger(LOG_NAME_GUARDIAN)
+    logger.fatal(message)
+    raise e
 
 
 def warning(message):
     """
     打印warning级别日志
     """
-    logger = LoggerFactory.get_logger("warning")
+    logger = Logger(LOG_NAME_GUARDIAN)
     logger.warning(message)
 
+
+def i(message):
+    """
+    打印ARK框架的info级别日志
+    """
+    logger = Logger(LOG_NAME_ARK)
+    logger.info(message)
+
+
+def d(message):
+    """
+    打印ARK框架的debug级别日志
+    """
+    logger = Logger(LOG_NAME_ARK)
+    logger.debug(message)
+
+
+def e(message):
+    """
+    打印ARK框架的error级别日志
+    """
+    logger = Logger(LOG_NAME_ARK)
+    logger.error(message)
+
+
+def f(message):
+    """
+    打印ARK框架的fatal级别日志
+    """
+    logger = Logger(LOG_NAME_ARK)
+    logger.fatal(message)
+
+
+def w(message):
+    """
+    打印ARK框架的warning级别日志
+    """
+    logger = Logger(LOG_NAME_ARK)
+    logger.warning(message)
+
+
+def r(e, message):
+    """
+    打印ARK框架的fatal级别日志，并raise异常
+    """
+    logger = Logger(LOG_NAME_ARK)
+    logger.fatal(message)
+    raise e

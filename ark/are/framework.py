@@ -13,20 +13,19 @@
 * ``MessagePump`` 消息泵，实现了框架核心运行机制，监听器绑定消息泵后，当各监听器关注的消息到达时，由消息泵进行消息分发。
 """
 import time
-import traceback
 import copy
+import multiprocessing
 
-from are import config
-from are import context
-from are import exception
-from are import log
-from are.ha_master import HAMaster
-from are.client import ZkClient
-from are.state_service import ArkServer
+from ark.are import config
+from ark.are import context
+from ark.are import exception
+from ark.are import log
+from ark.are.ha import HAMaster
+from ark.are.report import ArkServer
 
 
 EXECUTOR_OPERATION_ID = "EXECUTOR_OPERATION_ID"
-GUARDIAN_ID_NAME = "GUARDIAN_ID"
+
 
 class Message(object):
     """
@@ -132,7 +131,7 @@ class Listener(object):
         """
         self._concerned_message_list = list(set(self._concerned_message_list).
                                             union(set(message_name_list)))
-        log.info("register message success, concerned message list:{}".format(
+        log.i("register message success, concerned message list:{}".format(
             self._concerned_message_list))
 
     def deregister(self, message_name_list):
@@ -145,7 +144,7 @@ class Listener(object):
         """
         self._concerned_message_list = list(set(self._concerned_message_list).
                                             difference(set(message_name_list)))
-        log.info("deregister message success, concerned message list:{}".format(
+        log.i("deregister message success, concerned message list:{}".format(
             self._concerned_message_list))
 
     def active(self):
@@ -213,8 +212,10 @@ class Listener(object):
         :return: 无返回
         :rtype: None
         """
-        self._message_pump.send(message)
-        log.info("send message to message pump success, message:{}".format(
+        if multiprocessing.current_process().name != "MainProcess":
+            raise exception.ENotImplement("send() only be used in \'MainProcess\'")
+        self._message_pump.put(message)
+        log.d("send message to message pump success, message:{}".format(
             message.name))
 
 
@@ -225,7 +226,6 @@ class MessagePump(object):
     消息泵会定期取出消息，并分发给关注此类型消息的处理器，以驱动消息的处理。
 
     """
-    __SCHEDULE_INTERVAL = 1
     _message_queue = []
     _listener_list = []
     _listener_table = {}
@@ -255,8 +255,7 @@ class MessagePump(object):
             self._listener_list.remove(listener)
             del self._listener_table[listener]
         except ValueError as e:
-            log.warning("del listener failed, e:{}".format(e))
-            raise e
+            log.r(e, "del listener failed")
 
     def validate_listeners(self):
         """
@@ -292,7 +291,7 @@ class MessagePump(object):
         """
         return self._listener_table[listener]
 
-    def send(self, message):
+    def put(self, message):
         """
         发送一个消息至消息泵
 
@@ -324,7 +323,6 @@ class MessagePump(object):
         while not self._stop_tag:
             if not self._message_queue:
                 self._message_queue.append(IDLEMessage())
-                time.sleep(self.__SCHEDULE_INTERVAL)
             message = self._message_queue[0]
             for listener in self._listener_list:
                 if message.name not in self.list_listener_concern(listener):
@@ -332,12 +330,14 @@ class MessagePump(object):
                 else:
                     pass
                 try:
+                    if isinstance(message, OperationMessage):
+                        log.Logger.setoid(message.operation_id)
                     listener.on_message(message)
-                except Exception as e:
-                    log.warning(str(traceback.format_exc()))
-                    log.warning(
-                        "error occurred on listener:{}, error message:{}".
-                        format(listener.__class__, e))
+                except:
+                    log.f("error occurred on listener:{}".format(listener.__class__))
+                finally:
+                    log.Logger.clearoid()
+
             self._message_queue.remove(message)
             if not isinstance(message, IDLEMessage):
                 self.on_persistence()
@@ -361,45 +361,22 @@ class GuardianFramework(MessagePump):
     _run_tag = True
     __TIME_INTERVAL = 3
 
-    def init_environment(self):
-        """
-        初始化Guardian运行环境
-
-        :return: 无返回
-        :rtype: None
-        :raises EFailedRequest: 状态服务请求异常
-        """
-        config.GuardianConfig.load_config()
-        guardian_id = config.GuardianConfig.get(GUARDIAN_ID_NAME)
-        guardian_root_path = "/{}".format(guardian_id)
-        guardian_client_path = "{}/alive_clients".format(guardian_root_path)
-        context_path = guardian_root_path + "/context"
-        try:
-            zkc = ZkClient()
-        except exception.EFailedRequest as e:
-            raise e
-        try:
-            if not zkc.exists(guardian_root_path):
-                zkc.create_node(path=guardian_root_path)
-                log.debug("zk node %s created!" % guardian_root_path)
-            if not zkc.exists(context_path):
-                zkc.create_node(path=context_path)
-                log.debug("zk node %s created!" % context_path)
-            if not zkc.exists(guardian_client_path):
-                zkc.create_node(path=guardian_client_path)
-                log.debug("zk node %s created!" % guardian_client_path)
-        except Exception as e:
-            raise e
-
-    def start(self):
+    def start(self, pmode):
         """
         Guardian启动函数，当Guardian获得领导权后，消息泵开始工作。
 
+        :param str pmode: 所要使用的持久化类型，可选zookeeper或者local
         :return: 无返回
         :rtype: None
         """
-        self.init_environment()
+        from ark.are import persistence
+        if pmode == "zookeeper":
+            persistence.PersistenceDriver = persistence.ZkPersistence
+        else:
+            persistence.PersistenceDriver = persistence.FilePersistence
+        config.GuardianConfig.load_config()
         ArkServer().start()
+        HAMaster.init_environment()
         leader_election = HAMaster(self.obtain_leader, self.release_leader)
         leader_election.create_instance()
         leader_election.choose_master()
@@ -437,11 +414,9 @@ class GuardianFramework(MessagePump):
                     name = "DECIDED_MESSAGE"
                     params_cp = operation.operation_params
                     message = OperationMessage(name, operation_id, copy.deepcopy(params_cp))
-                    log.info("recover_message operation_id:{}".format(
+                    log.i("recover_message operation_id:{}".format(
                         operation_id))
                     self._context.message_list.append(message)
-
-
 
     def release_leader(self):
         """
@@ -464,7 +439,7 @@ class GuardianFramework(MessagePump):
         :rtype: None
         """
         self._context.save_context()
-        log.info("context persistent success")
+        log.i("context persistent success")
 
 
 class BaseSensor(Listener):
@@ -538,17 +513,13 @@ class BaseExecutor(Listener):
         :raises ETypeMismatch: 返回值类型不匹配
         :raises EMissingParam: 返回值缺字段
         """
-        ret = self.on_execute_message(message)
-        log.info("execute message return:{}".format(ret))
-        if not ret:
+        message = self.on_execute_message(message)
+        if not message:
             return
-        elif not isinstance(ret, dict):
+        elif not isinstance(message, Message):
             raise exception.ETypeMismatch()
-        elif EXECUTOR_OPERATION_ID not in ret:
-            raise exception.EMissingParam()
         else:
-            message = OperationMessage("COMPLETE_MESSAGE",
-                                       ret[EXECUTOR_OPERATION_ID], ret)
+            log.i("execute message return:{}".format(message))
             self.send(message)
 
     def on_execute_message(self, message):
@@ -557,7 +528,7 @@ class BaseExecutor(Listener):
 
         :param Message message: 消息对象
         :return: 执行结果
-        :rtype: dict
+        :rtype: Message
         :raises ENotImplement: 未实现
         """
         raise exception.ENotImplement("function is not implement")

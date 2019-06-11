@@ -8,8 +8,7 @@
 **lock** 框架提供的分布式锁模块，使用分布式强一致系统实现（当前版本使用Zookeeper)，用于竞态条件控制，如并发度控制，主从等
 
 """
-from are import config
-from are import client
+from ark.are import config
 from kazoo.client import KazooClient
 
 
@@ -27,12 +26,11 @@ class Lock(object):
         :raises kazoo.interfaces.IHandler.timeout_exception: 连接超时异常
         """
         self._lock_name = name
-        self._guardian_id = config.GuardianConfig.get(client.GUARDIAN_ID_NAME)
-        self._lock_node_path = "{}/lock".format(self._guardian_id)
+        self._lock_node_path = config.GuardianConfig.get_persistent_path("lock")
         self._lock_node = self._lock_node_path + '/' + self._lock_name
         self._lock_handle = None
 
-        hosts = config.GuardianConfig.get(client.STATE_SERVICE_HOSTS)
+        hosts = config.GuardianConfig.get(config.STATE_SERVICE_HOSTS_NAME)
         self._zkc = KazooClient(hosts=hosts)
         self._zkc.start()
 

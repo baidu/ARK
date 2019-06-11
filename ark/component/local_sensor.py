@@ -10,7 +10,7 @@
 import json
 import os
 
-from are.sensor import PullCallbackSensor
+from ark.are.sensor import PullCallbackSensor
 
 
 class LocalCallbackSensor(PullCallbackSensor):
@@ -37,6 +37,8 @@ class LocalCallbackSensor(PullCallbackSensor):
         :return: 事件
         :rtype: dict
         """
+        if not os.path.exists(self._event_file):
+            return None
         with open(self._event_file, 'r') as json_file:
             json_str = json_file.read()
             event = json.loads(json_str)

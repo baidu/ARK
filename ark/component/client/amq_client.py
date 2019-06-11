@@ -7,9 +7,9 @@
 """
 activemq 操作客户端
 """
-from are import config
-from are import log
-from are.client import BaseClient
+from ark.are import config
+from ark.are import log
+from ark.are.client import BaseClient
 
 import stomp
 
@@ -27,7 +27,7 @@ class ActiveMQClient(BaseClient):
         :param func callback_message: 订阅到消息后的回调函数
         """
         mq_config = config.GuardianConfig.get(self.ARK_MQ_CONFIG)
-        log.info("activeMQ config:{}".format(mq_config))
+        log.i("activeMQ config:{}".format(mq_config))
         self.conn = self.__get_connection(mq_config)
         self.conn.set_listener('', ActiveMQListener(callback_message))
         self.conn.start()
@@ -42,7 +42,7 @@ class ActiveMQClient(BaseClient):
         :rtype: None
         """
         self.conn.subscribe(destination=subscribe_condition)
-        log.info("start subscribe success, topic:{}".format(
+        log.i("start subscribe success, topic:{}".format(
             subscribe_condition))
 
     def unsubscribe(self):
@@ -53,7 +53,7 @@ class ActiveMQClient(BaseClient):
         :rtype: None
         """
         self.conn.disconnected()
-        log.info("unsubscribe success, connect closed")
+        log.i("unsubscribe success, connect closed")
 
     def __get_connection(self, conf):
         """
@@ -86,7 +86,7 @@ class ActiveMQListener(object):
         :return: 无返回
         :rtype: None
         """
-        log.error("receive an error:{}".format(message))
+        log.e("receive an error:{}".format(message))
 
     def on_message(self, header, message):
         """
@@ -97,5 +97,5 @@ class ActiveMQListener(object):
         :return: 无返回
         :rtype: None
         """
-        log.info("receive a message:{}".format(message))
+        log.i("receive a message:{}".format(message))
         self._callback_message(message)

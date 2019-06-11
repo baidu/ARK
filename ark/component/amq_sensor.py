@@ -7,8 +7,8 @@
 """
 使用activeMq外部推送类型的感知器具体实现
 """
-from are.sensor import CallbackSensor
-from component.client.amq_client import ActiveMQClient
+from ark.are.sensor import CallbackSensor
+from ark.component.client.amq_client import ActiveMQClient
 
 
 class MqPushCallbackSensor(CallbackSensor):

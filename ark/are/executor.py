@@ -11,14 +11,12 @@ import Queue
 import copy
 import multiprocessing
 import time
-import traceback
 
-from are import graph
-from are import context
-from are import framework
-from are import log
-from are import exception
-from are import stage
+from ark.are import graph
+from ark.are import context
+from ark.are import framework
+from ark.are import log
+from ark.are import exception
 
 
 class BaseExecFuncSet(object):
@@ -94,8 +92,8 @@ class MultiProcessExecutor(framework.BaseExecutor):
         manager = multiprocessing.Manager()
         self._result_queue = manager.Queue()
         self._concerned_message_list = ["IDLE_MESSAGE", "DECIDED_MESSAGE"]
-        self._todo_message_queue = []
-        self._process_pool = multiprocessing.Pool(processes=process_count)
+        self._process_count = process_count
+        self._process_pool = None
 
     def __getstate__(self):
         self_dict = self.__dict__.copy()
@@ -104,6 +102,12 @@ class MultiProcessExecutor(framework.BaseExecutor):
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+
+    def active(self):
+        self._process_pool = multiprocessing.Pool(processes=self._process_count)
+
+    def inactive(self):
+        self._process_pool.terminate()
 
     def on_execute_message(self, message):
         """
@@ -116,20 +120,15 @@ class MultiProcessExecutor(framework.BaseExecutor):
         :raises EUnknownEvent: 未知消息异常
         """
         if message.name == "DECIDED_MESSAGE":
-            self._todo_message_queue.append(message)
+            self.on_pre_action(message)
+            self._process_pool.apply_async(run_process, (self, message))
         elif message.name == "IDLE_MESSAGE":
-            if not self._todo_message_queue:
-                pass
-            else:
-                todo_message = self._todo_message_queue.pop(0)
-                self.on_pre_action(todo_message)
-                self._process_pool.apply_async(run_process, (self, todo_message))
             try:
                 ret = self._result_queue.get(block=False)
             except Queue.Empty:
                 pass
             else:
-                self.send(ret)
+                return ret
         elif message.name in self._concerned_message_list:
             self.on_extend_message(message)
         else:
@@ -167,13 +166,18 @@ class MultiProcessExecutor(framework.BaseExecutor):
         :rtype: None
         """
         try:
+            log.Logger.setoid(message.operation_id)
+            log.i("process new message")
+            log.d("process new message,param:%s" % str(message.params))
             ret = self.execute_message(message)
         except Exception as e:
+            log.f("execute_message fail")
             ret = "err:{}".format(e)
 
         message = framework.OperationMessage(
             "COMPLETE_MESSAGE", message.operation_id, ret)
         self._result_queue.put(message)
+        log.Logger.clearoid()
         return
 
     def execute_message(self, message):
@@ -217,7 +221,7 @@ class CallbackExecutor(MultiProcessExecutor):
                 message.params[self._exec_key], message.params)
 
 
-class StateMachineExecutor(MultiProcessExecutor):
+class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelper):
     """
     状态机执行器。该执行器会在待执行消息到来时，生成（Guardian实例迁移时会先加载当前运行状态）状态机对象，找一个空闲的处理子进程执行状态机。执行逻辑为：
     * 选择当前运行状态（新建状态机当前状态为状态列表中第一个状态），并处理
@@ -267,90 +271,61 @@ class StateMachineExecutor(MultiProcessExecutor):
         """
         state_machine = self._create_state_machine(message, self._nodes)
         # 状态机启动
-        self.graph_start(state_machine)
+        state_machine.start()
+        try:
+            del self._control_message[state_machine.session.id]
+        except Exception as e:
+            str(e)
+        log.i(
+            "state machine run finished, operationId:%s" % format(state_machine.session.id))
 
-    def graph_start(self, state_machine):
+    def persist(self, session, reason, finished_name, next_name):
         """
-        状态机启动执行。状态机启动后，会根据每个节点执行的返回值，执行下一个节点，直到返回
-        结束或执行异常。在每个节点执行完成后，会向结果队列中发送消息，由主进程进行处理
+        提供必要的持久化实现
 
-        :param StateMachine state_machine: 状态机实例
+        .. Note:: session中的控制消息应在处理完成之后被清理，否则会造成重复触发
+
+        :param object session: 状态机的session
+        :param str reason: 持久化的原因
+        :param str finished_name: 已经完成的节点名
+        :param str next_name: 下一个将处理的节点名
         :return: 无返回
         :rtype: None
         """
-        session = state_machine.session
-        while True:
-            try:
-                control = copy.deepcopy(
-                    self._control_message[session.id])
-            except KeyError:
-                control = None
-            if control is not None:
-                # 状态机第一次处理控制消息或控制消息为最新还没被处理
-                if session.last_control_id is None \
-                        or session.last_control_id != control['control_id']:
-                    control_message = copy.deepcopy(control['message'])
-                    session.last_control_id = control['control_id']
-                else:
-                    control_message = None
-            else:
-                control_message = None
-            session.control_message = control_message
+        if reason == graph.PersistedStateMachineHelper.Reason.CONTROL:
+            message_name = "PERSIST_SESSION_MESSAGE"
+        elif reason == graph.PersistedStateMachineHelper.Reason.STARTED:
+            message_name = "STATE_COMPLETE_MESSAGE"
+        elif reason == graph.PersistedStateMachineHelper.Reason.NODE_CHANGED:
+            message_name = "STATE_COMPLETE_MESSAGE"
+        if session is not None:
+            params = {
+                "session": session,
+                "finished_node": finished_name,
+                "current_node": next_name,
+                "timestamp": int(time.time())
+            }
+            notice = framework.OperationMessage(
+                message_name,
+                str(session.id), params)
+            self._result_queue.put(notice)
+        else:
+            log.e("operation persist but session is None")
 
-            #第一次运行的状态机，记录第一个节点信息
-            if state_machine.status == state_machine.Status.INITED:
-                todo_params = state_machine.dump()
-                todo_node = todo_params["current_node"]
-                todo_params = {
-                    "session": session,
-                    "finished_node": None,
-                    "current_node": todo_node,
-                    "timestamp": int(time.time())
-                }
-                todo_notice = framework.OperationMessage(
-                    "STATE_COMPLETE_MESSAGE",
-                    str(session.id), todo_params)
-                self._result_queue.put(todo_notice)
-                state_machine.status = state_machine.Status.RUNNING
+    def get_control_message(self, session):
+        """
+        获取当前是否有控制消息需要处理。如果没有，则应返回None, None
 
-            if state_machine.status == state_machine.Status.RUNNING:
-                try:
-                    log.info("state machine run state:{}".format(session.id))
-                    todo_params = state_machine.dump()
-                    todo_node = todo_params["current_node"]
-
-                    state_machine.run_next()
-                    finished_params = state_machine.dump()
-                    session.status = finished_params["status"]
-                    #状态机Session的current_node为节点，而不再是节点的名称
-                    session.current_node = state_machine.get_node(finished_params["current_node"])
-                    session.nodes_process = copy.copy(
-                        finished_params["nodes_process"])
-                    session.nodes_process[session.current_node] = True
-                    current_node = session.current_node if \
-                        session.current_node.name != "ARK_NODE_END" else None
-                    params = {
-                        "session": session,
-                        "finished_node": todo_node,
-                        "current_node": current_node,
-                        "timestamp": int(time.time())
-                    }
-                    notice = framework.OperationMessage(
-                        "STATE_COMPLETE_MESSAGE",
-                        str(session.id), params)
-                    if todo_node != current_node or session.reset_flush(): #节点变更或业务方指定持久化Session
-                        self._result_queue.put(notice)
-
-                except Exception as e:
-                    log.warning("graph run exception:{}".format(e))
-                    log.warning("err:{}".format(traceback.format_exc()))
-                    state_machine.status = state_machine.Status.FAILED
-                    break
-            else:
-                break
-        del self._control_message[session.id]
-        log.info(
-            "state machine run finished, operationId:{}".format(session.id))
+        :param object session: 状态机的session
+        :return: 控制消息ID，控制消息
+        :rtype: str, object
+        """
+        try:
+            control = self._control_message[session.id]
+            return control['control_id'], control['message']
+        except:
+            log.f("get control message fail")
+            return None, None
 
     def _create_state_machine(self, message, nodes):
         """
@@ -365,9 +340,9 @@ class StateMachineExecutor(MultiProcessExecutor):
 
         state_machine_session = operation.session
         if not state_machine_session:
-            session = StateMachineSession(id=message.operation_id,
-                                          params=message.params)
-            state_machine = graph.StateMachine(session)
+            session = graph.PersistedStateMachineSession(id=message.operation_id,
+                                                         params=message.params)
+            state_machine = graph.PersistedStateMachine(session)
             for node in nodes:
                 state_machine.add_node(node)
             state_machine.prepare()
@@ -375,60 +350,31 @@ class StateMachineExecutor(MultiProcessExecutor):
             session.current_node = ret["current_node"]
             session.nodes_process = ret["nodes_process"]
             session.status = ret["status"]
+            self._control_message[session.id] = None
         else:
             session = state_machine_session
-            state_machine = graph.StateMachine(session)
+            state_machine = graph.PersistedStateMachine(session)
             state_machine.load(session, session.nodes_process,
                                session.current_node.name, session.status)
-            #状态机的current_node必须为持久化至Session中的current_node
+            # 状态机的current_node必须为持久化至Session中的current_node
             for node in nodes:
                 if node.name == session.current_node.name:
                     state_machine.add_node(session.current_node)
                 else:
                     state_machine.add_node(node)
+            # reload控制消息
+            self._control_message[session.id] = session.control_message
 
         self._graphs[session.id] = state_machine
-        self._control_message[session.id] = None
+        state_machine.set_helper(self)
         return state_machine
 
     @context.GuardianContext.new_action
     def send(self, message):
         """
-        发送消息至消息泵
-
+        发送消息至消息泵，更新状态机中的每个状态变化为action
         :param Message message: 消息对象
         :return: 无返回
         :rtype: None
         """
-        super(StateMachineExecutor, self).send(message)
-
-
-class StateMachineSession(context.FlushFlag):
-    """
-    状态机session定义，一个状态机session，与状态机Guardian对象绑定，记录状态机运行信息（
-    如当前节点，节点运行状态，控制消息等），根据状态机session可完全回滚状态机运行状态
-    """
-
-    def __init__(self, id=None, params=None, current_node=None,
-                 nodes_process=None, status=None,
-                 control_message=None, last_control_id=None):
-        """
-        初始化方法
-
-        :param str id: 操作id
-        :param dict params: 自定义参数
-        :param current_node: 当前节点
-        :param dict nodes_process: 节点执行信息
-        :param str status: 状态机当前状态
-        :param dict control_message: 控制消息
-        :param list handle_list: stage处理结果
-        :param str last_control_id: 控制消息id
-        """
-        self.id = id
-        self.params = params
-        self.current_node = current_node
-        self.nodes_process = nodes_process
-        self.status = status
-        self.control_message = control_message
-        self.handle_list = []
-        self.last_control_id = last_control_id
+        return super(StateMachineExecutor, self).send(message)

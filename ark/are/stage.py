@@ -7,10 +7,13 @@
 """
 分级操作通用模块，可以用来构造相应的状态机节点
 """
-from are import exception
-from are import graph
-from are import log
-from are import context
+from ark.are import exception
+from ark.are import graph
+from ark.are import log
+from ark.are import context
+from ark.are import config
+
+DELIMITER_NAME = "STAGE_NAME_DELIMITER"
 
 
 class StageBuilder(object):
@@ -89,6 +92,16 @@ class StageBuilder(object):
         """
         self._adapter = job_adapter
 
+    @staticmethod
+    def _nominate(*sub_str):
+        """
+        根据配置的分隔符，组装节点名字
+
+        :return: 节点名
+        :rtype: str
+        """
+        return config.GuardianConfig.get(DELIMITER_NAME, "-").join(sub_str)
+
     def _begin(self):
         """
         开始分级操作
@@ -108,8 +121,9 @@ class StageBuilder(object):
         :return: 无返回
         :rtype: None
         """
-        end_node_name = "end-job-" + \
-                        str(self._total_stage + 1) + "-sub-1"
+        end_node_name = self._nominate("end", "job", "") + \
+                        str(self._total_stage + 1) + \
+                        self._nominate("", "sub", "1")
         end_node = EndNode(end_node_name, True)
         self._stage_list.append(end_node)
 
@@ -135,8 +149,12 @@ class StageBuilder(object):
             self._stage_list.append(job_node)
 
         job_end_node_name = next_stage_name
-        job_verify_node_name = job_end_node_name.split("-sub-")[0].\
-            replace("-job-", "-verify-", -1)
+        sub_sep = self._nominate("", "sub", "")
+        job_sep = self._nominate("", "job", "")
+        verify_sep = self._nominate("", "verify", "")
+
+        job_verify_node_name = job_end_node_name.split(sub_sep)[0].\
+            replace(job_sep, verify_sep, -1)
         job_end_node = JobEndNode(next_stage_name, job_verify_node_name, True)
         self._stage_list.append(job_end_node)
 
@@ -168,8 +186,10 @@ class StageBuilder(object):
         :return: 任务节点名
         :rtype: str
         """
-        job_stage_name = stage_name + "-job-" + str(index + 1) + "-sub-" \
-                         + str(sub_index + 1)
+        sub_sep = self._nominate("", "sub", "")
+        job_sep = self._nominate("", "job", "")
+        job_stage_name = stage_name + job_sep + str(index + 1) + sub_sep + \
+                         str(sub_index + 1)
         return job_stage_name
 
     def _get_verify_stage_name(self, stage_name, index):
@@ -181,7 +201,8 @@ class StageBuilder(object):
         :return: 确认节点名
         :rtype: str
         """
-        verify_stage_name = stage_name + "-verify-" + str(index + 1)
+        verify_sep = self._nominate("", "verify", "")
+        verify_stage_name = stage_name + verify_sep + str(index + 1)
         return verify_stage_name
 
     def _get_next_stage_name(self, cur_stage_name, next_name):
@@ -194,7 +215,9 @@ class StageBuilder(object):
         :rtype: str
         :raise ECheckFailed: 状态名检查失败异常
         """
-        cur_stage_name_tmp_list = cur_stage_name.split("-")
+        sub_sep = self._nominate("", "sub", "")
+        job_sep = self._nominate("", "job", "")
+        cur_stage_name_tmp_list = cur_stage_name.split(config.GuardianConfig.get(DELIMITER_NAME))
         if len(cur_stage_name_tmp_list) < 3:
             raise exception.ECheckFailed("stage name:{} check failed".
                                          format(cur_stage_name))
@@ -204,11 +227,11 @@ class StageBuilder(object):
         stage_index = cur_stage_name_tmp_list[2]
         if stage_type == "job":
             sub_index = cur_stage_name_tmp_list[4]
-            next_stage_name = stage_name + "-job-" + str(stage_index) + \
-                              "-sub-" + str(int(sub_index) + 1)
+            next_stage_name = stage_name + job_sep + str(stage_index) + \
+                              sub_sep + str(int(sub_index) + 1)
         else:
-            next_stage_name = next_name + "-job-" + \
-                              str(int(stage_index) + 1) + "-sub-1"
+            next_stage_name = next_name + job_sep + \
+                              str(int(stage_index) + 1) + sub_sep + "1"
         return next_stage_name
 
 
@@ -269,7 +292,7 @@ class JobAdapter(context.FlushFlag):
         """
         刷新任务状态
 
-        :param list handle_list: job句柄列表，每个句柄都包含job的必要信息，可根据该句柄获取job的当前状态，控制job的暂停，取消等动作
+        :param list job_handle_list: job句柄列表，每个句柄都包含job的必要信息，可根据该句柄获取job的当前状态，控制job的暂停，取消等动作
         :param str node_name: 当前的状态机节点名
         :param object session: 状态机的session
         :return: 返回码
@@ -290,7 +313,7 @@ class JobAdapter(context.FlushFlag):
         raise exception.ENotImplement("function is not implement")
 
 
-class JobNode(graph.Node):
+class JobNode(graph.State):
     """
     分级操作任务节点
     """
@@ -331,7 +354,7 @@ class JobNode(graph.Node):
         return next_stage_name
 
 
-class JobEndNode(graph.Node):
+class JobEndNode(graph.State):
     """
     任务结束节点
     """
@@ -359,7 +382,7 @@ class JobEndNode(graph.Node):
         return self._next_name
 
 
-class VerifyNode(graph.Node):
+class VerifyNode(graph.State):
     """
     分级操作结果确认节点
     """
@@ -395,7 +418,7 @@ class VerifyNode(graph.Node):
             session.set_flush(self._task_controller.reset_flush())
 
             if ret_code != 0:
-                log.warning("task control failed,task name:{}".format(
+                log.w("task control failed,task name:{}".format(
                     self.name))
             else:
                 session.control_message = None
@@ -404,12 +427,12 @@ class VerifyNode(graph.Node):
         session.set_flush(self._task_controller.reset_flush())
 
         if ret_code == 0:
-            log.warning("task:{} finished,run next task:{}".format(
+            log.i("task:{} finished,run next task:{}".format(
                 self.name, self._next_name))
             session.handle_list = []
             next_stage_name = self._next_name
         elif ret_code < 0:
-            log.warning("get task result,retcode:{}".format(ret_code))
+            log.w("get task result,retcode:{}".format(ret_code))
             session.handle_list = []
             next_stage_name = "ARK_NODE_END"
         else:
@@ -417,7 +440,7 @@ class VerifyNode(graph.Node):
         return next_stage_name
 
 
-class EndNode(graph.Node):
+class EndNode(graph.State):
     """
     结束节点
     """

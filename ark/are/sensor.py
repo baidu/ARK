@@ -12,10 +12,10 @@ import threading
 import time
 import uuid
 
-from are import log
-from are import exception
-from are.framework import BaseSensor
-from are.framework import OperationMessage
+from ark.are import log
+from ark.are import exception
+from ark.are.framework import BaseSensor
+from ark.are.framework import OperationMessage
 
 
 class CallbackSensor(BaseSensor):
@@ -48,7 +48,7 @@ class CallbackSensor(BaseSensor):
             event = self._event_queue.get(block=False)
         except Queue.Empty:
             return
-        log.info("get new event:{}".format(event))
+        log.i("get new event:{}".format(event))
         operation_id = self.get_operation_id(event)
         sensed_message = OperationMessage("SENSED_MESSAGE", operation_id, event)
         self.send(sensed_message)
@@ -75,7 +75,7 @@ class CallbackSensor(BaseSensor):
         :rtype: str
         """
         ret = event["operation_id"] if "operation_id" in event else uuid.uuid1()
-        log.info("event operation_id:{}".format(ret))
+        log.i("event operation_id:{}".format(ret))
         return str(ret)
 
 
@@ -107,8 +107,7 @@ class PullCallbackSensor(CallbackSensor):
             self._pull_thread.daemon = True
             self._pull_thread.start()
         except threading.ThreadError as e:
-            log.error("create new thread err:{}".format(e))
-            raise e
+            log.r(e, "create new thread err")
 
     def inactive(self):
         """
@@ -132,13 +131,15 @@ class PullCallbackSensor(CallbackSensor):
         while not self._stop_tag:
             try:
                 event = self.get_event()
-            except Exception as e:
-                log.warning("get event failed,err:{}".format(e))
+                if event is None:
+                    time.sleep(self._query_interval)
+                    continue
+            except:
+                log.f("get event failed")
                 time.sleep(self._query_interval)
                 continue
-            log.info("get a new event from external system")
+            log.i("get a new event from external system")
             self.callback_event(event)
-            time.sleep(self._query_interval)
 
     def get_event(self):
         """

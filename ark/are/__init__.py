@@ -15,17 +15,20 @@
 * ``config`` 配置管理模块
 * ``lock`` 该模块基于zookeeper实现了分布式锁功能
 * ``client`` 提供了对常用客户端调用的封装，包括请求、结果处理等；并提供了ARK运行必须组件的客户端封装
-* ``grapy`` 基于图算法实现的运维执行模式，该模块基于运维场景中常见操作流程，抽象出状态机和工作流两种标准运维作业流程。
-* ``state_service`` 状态服务模块，提供状态运行进度展示功能
+* ``graph`` 基于图算法实现的运维执行模式，该模块基于运维场景中常见操作流程，抽象出状态机和工作流两种标准运维作业流程。
+* ``report`` 状态汇报模块，提供状态运行进度展示功能
 * ``framework`` 框架核心模块，提供了消息泵机制及感知、决策、执行基类的定义和实现
-* ``context`` Guardian运行上下文信息管理模块
 * ``sensor`` 感知器模块，提供常见感知模型的实现
 * ``decision`` 决策器模块，提供常见决策模型的实现
 * ``executor`` 执行器模块，提供常见执行模型的实现
 * ``stage`` 包含了分级策略的描述及具体流程
+* ``persistence`` 提供了常见的状态持久化的能力支持
+* ``context`` 在状态持久化能力基础上提供的上下文存储与管理
+* ``ha`` 在状态持久化能力基础上提供的高可用主备切换功能
+
 """
 __version = '1.0.0'
-__all = ['client', 'common', 'config', 'exception', 'graph',
-         'loader', 'lock', 'log', 'server', 'framework', 'context',
-         'sensor', 'decision', 'executor', 'stage', ]
+__all = ['client', 'common', 'config', 'exception', 'graph', 'ha',
+         'loader', 'lock', 'log', 'report', 'framework', 'context',
+         'sensor', 'decision', 'executor', 'stage', 'persistence']
 

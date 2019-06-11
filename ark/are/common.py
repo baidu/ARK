@@ -14,7 +14,7 @@
 * ``StringUtil`` 字符串操作工具类，统一封装字符串相关的处理接口
 """
 
-from are import exception
+from ark.are import exception
 import re
 
 

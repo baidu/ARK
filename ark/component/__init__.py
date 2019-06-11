@@ -15,4 +15,4 @@
 
 """
 __version = '1.0.0'
-__all = ['stage_executor', 'amq_sensor', 'es_sensor', 'local_sensor']
+__all = ['stage_executor', 'amq_sensor', 'es_sensor', 'local_sensor', 'cron_sensor']

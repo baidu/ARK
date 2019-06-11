@@ -7,8 +7,8 @@
 """
 实体类定义，实体类定义操作对象属性及操作方法
 """
-from are.common import OpObject
-from are.exception import ENotImplement
+from ark.are.common import OpObject
+from ark.are.exception import ENotImplement
 
 
 class Entity(OpObject):

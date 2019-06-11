@@ -7,8 +7,8 @@
 """
 使用从elasticsearch拉取外部事件的方式实现的感知器
 """
-from are.sensor import PullCallbackSensor
-from are.client import ESClient
+from ark.are.sensor import PullCallbackSensor
+from ark.are.client import ESClient
 
 
 class EsCallbackSensor(PullCallbackSensor):
@@ -31,9 +31,9 @@ class EsCallbackSensor(PullCallbackSensor):
 
     def get_event(self):
         """
-        获取事件
+        根据查询条件，从ES中获取相应事件
 
-        :return: 事件
+        :return: 从ES获取到的事件，事件参数以词典KV返回
         :rtype: dict
         """
         event = self._pull_client.get_data_with_condition(self._condition)
