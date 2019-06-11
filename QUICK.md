@@ -6,9 +6,9 @@
 
 为了便于快速上手验证，本文我们使用本地文件方式代替ZooKeeper。
 
-`
-本地文件方式可以通过给loader.py增加-p local参数来指定。如不指定默认为ZooKeeper方式
-`
+
+> 本地文件方式可以通过给loader.py增加-p local参数来指定。如不指定默认为ZooKeeper方式
+
 
 ## 1.下载源码
 
