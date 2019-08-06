@@ -56,6 +56,7 @@ class _CronTimer(object):
     def param(self):
         return self._param_str
 
+    @property
     def timer(self):
         return self._timer_str
 
@@ -96,26 +97,28 @@ class _CronClock(object):
         timer_list = []
 
         # 获取每个定时器下次到期时间，按照到期时间排序
-        for cronstr in cron_list:
-            timer = _CronTimer(cronstr[0], cronstr[1], now)
-            timer_list.append(timer)
-
-        timer_list.sort()
-
+        # 避免self._timer_queue中timer被trigger()重新计算下次执行时间
         with self._lock:
+            for cronstr in cron_list:
+                timer = _CronTimer(cronstr[0], cronstr[1], now)
+                timer_list.append(timer)
+
+            timer_list.sort()
+
+
             # 按照下次到期时间的顺序，在定时器队列中寻找相同的定时器位置。将寻找到的位置记录到result中
             # 如果未找到，则忽略
             for timer in timer_list:
                 pos = bisect.bisect_left(self._timer_queue, timer, pos)
                 for i in range(pos, len(self._timer_queue)):
-                    if self._timer_queue[i] > timer:
-                        break
                     if self._timer_queue[i] == timer:
                         result.append(i)
+                    if self._timer_queue[i] > timer:
+                        break
 
             # 按照倒序方式删除对应元素
             for i in range(len(result) - 1, -1, -1):
-                self._timer_queue.pop(i)
+                self._timer_queue.pop(result[i])
 
         return result
 
@@ -134,13 +137,13 @@ class _CronClock(object):
         timer_list = []
 
         # 获取每个定时器下次到期时间，按照到期时间排序
-        for cronstr in cron_list:
-            timer = _CronTimer(cronstr[0], cronstr[1], now)
-            timer_list.append(timer)
-
-        timer_list.sort()
-
         with self._lock:
+            for cronstr in cron_list:
+                timer = _CronTimer(cronstr[0], cronstr[1], now)
+                timer_list.append(timer)
+
+            timer_list.sort()
+
             for timer in timer_list:
                 pos = bisect.bisect_right(self._timer_queue, timer, pos)
                 self._timer_queue.insert(pos, timer)
