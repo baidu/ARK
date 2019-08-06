@@ -44,14 +44,26 @@ class CallbackSensor(BaseSensor):
         :return: 无返回
         :rtype: None
         """
-        try:
-            event = self._event_queue.get(block=False)
-        except Queue.Empty:
+        event = self.wait_event()
+        if event is None:
             return
         log.i("get new event:{}".format(event))
         operation_id = self.get_operation_id(event)
         sensed_message = OperationMessage("SENSED_MESSAGE", operation_id, event)
         self.send(sensed_message)
+
+    def wait_event(self, block=False):
+        """
+        从事件队列中取出事件
+
+        :param bool block: 是否阻塞取出事件
+        :return: 取出的事件
+        :rtype: dict
+        """
+        try:
+            return self._event_queue.get(block=block)
+        except Queue.Empty:
+            return None
 
     def callback_event(self, event):
         """
