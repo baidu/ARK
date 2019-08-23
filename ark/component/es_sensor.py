@@ -9,6 +9,7 @@
 """
 import time
 import Queue
+import datetime
 from ark.are.sensor import PullCallbackSensor
 from ark.are.client import BaseClient
 from ark.are import log
@@ -32,7 +33,7 @@ class EsEventDriver(object):
                  filter_kv=None,
                  mustnot_kv=None,
                  should_kv=None, minimum_should_match=1,
-                 header=None):
+                 header=None, query_size=100):
         """
 
         :param str index_tmpl: 需要查询的事件所处的index的模版，可以根据当前日期生成实际的index
@@ -43,6 +44,7 @@ class EsEventDriver(object):
         :param dict should_kv: field名（k）可选为指定值（v），可传入多个表示尽量同时满足
         :param int minimum_should_match: should_kv中filed名值最少满足数量
         :param dict header: http请求头
+        :param int query_size: 单次查询数量
 
         """
         self._host = config.GuardianConfig.get(self.ARK_ES_HOST)
@@ -62,6 +64,7 @@ class EsEventDriver(object):
         self._time_k = time_k
         self._client = BaseClient()  # 避免继承于BaseClient单例类
         self._header = header
+        self._query_size = query_size
 
     def _compose_filter(self, time_begin, time_end):
         """
@@ -75,34 +78,81 @@ class EsEventDriver(object):
         """
         raise exception.ENotImplement("function is not implement")
 
-    def query_event(self, time_begin, time_end):
+    def _query_event_perpage(self, index, time_begin, time_end, pageno):
         """
-        根据查询条件，查询出满足条件并且在指定时间范围内的事件文档，如果时间范围跨天，则会在两天的索引中同时查询
+        处理分页文档中的每一页
 
-        .. Note:: 即使时间范围跨越多天，也仅会处理首尾两天
+        :param str index: 索引名
+        :param int time_begin: 查询筛选的开始时间
+        :param int time_end:  查询筛选的结束时间
+        :param int pageno:  当前请求的页号
+        :return: (事件文档列表, 所有匹配的总数量)
+        :rtype: (list, int)
 
+        """
+
+        url = "/{}/{}/_search".format(index, self._type)
+        filter_data = self._compose_filter(time_begin, time_end)
+        data = '{%s, "size": %d, "from": %d}' % \
+               (filter_data, self._query_size, pageno * self._query_size)
+        response_code = [200, 404]
+        ret = self._client.http_request(self._host, self._port, "GET", url,
+                                        header=self._header,
+                                        data=data, response_code=response_code)
+        if "status" in ret:
+            code = ret["status"]
+            if code == 404:
+                return [], 0
+
+        event_list = []
+        total = ret["hits"]["total"]
+        for event in ret["hits"]["hits"]:
+            event["_source"]["_id"] = event["_id"]
+            event_list.append(event["_source"])
+        return event_list, total
+
+    def query_perday(self, index, time_begin, time_end):
+        """
+        处理分页文档，将分页文档合并成完整的文档列表
+
+        :param str index: 索引名
         :param int time_begin: 查询筛选的开始时间
         :param int time_end:  查询筛选的结束时间
         :return: 事件文档列表
         :rtype: list
 
         """
-        begin = time.strftime(self._index_tmpl, time.localtime(time_begin))
-        end = time.strftime(self._index_tmpl, time.localtime(time_end))
-        if begin != end:
-            index = begin + "," + end
-        else:
-            index = begin
-        url = "/{}/{}/_search".format(index, self._type)
-        data = self._compose_filter(time_begin, time_end)
-        ret = self._client.http_request(self._host, self._port, "GET", url,
-                                        header=self._header,
-                                        data=data)
-        event_list = []
-        for event in ret["hits"]["hits"]:
-            event["_source"]["_id"] = event["_id"]
-            event_list.append(event["_source"])
-        return event_list
+        pageno = 0
+        event_day = []
+        while True:
+            event_list, total = self._query_event_perpage(index, time_begin, time_end, pageno)
+            event_day.extend(event_list)
+            pageno += 1
+            if pageno * self._query_size >= total:
+                break
+        return event_day
+
+    def query_all(self, time_begin, time_end):
+        """
+        根据查询条件，查询出满足条件并且在指定时间范围内的事件文档，如果时间范围跨天，则会针对每一天都进行查询后再将合并的结果返回
+
+        :param int time_begin: 查询筛选的开始时间
+        :param int time_end:  查询筛选的结束时间
+        :return: 事件文档列表
+        :rtype: list
+        """
+        begtime = datetime.datetime.fromtimestamp(time_begin)
+        endtime = datetime.datetime.fromtimestamp(time_end)
+        end_index = endtime.strftime(self._index_tmpl)
+        curtime = begtime
+        event_all = []
+        while True:
+            index = curtime.strftime(self._index_tmpl)
+            event_all.extend(self.query_perday(index, time_begin, time_end))
+            if index == end_index:
+                break
+            curtime = curtime + datetime.timedelta(days=1)
+        return event_all
 
     def get_ts(self, event):
         """
@@ -141,8 +191,8 @@ class EsEventDriver2x(EsEventDriver):
         :raises ENotImplement: 未实现
         """
         request_model = \
-            '{"query": {"bool": {"filter": [%s],"must_not": [%s],"should": [%s],' \
-            '"minimum_should_match": %d,"boost": 1.0}}}'
+            '"query": {"bool": {"filter": [%s],"must_not": [%s],"should": [%s],' \
+            '"minimum_should_match": %d,"boost": 1.0}}'
 
         filter_clause_item = ['{"term": {"%s": "%s"}}' % (k, v) for k, v in self._filter_kv.iteritems()]
         filter_clause = ", ".join(filter_clause_item)
@@ -174,7 +224,7 @@ class EsEventDriver1x(EsEventDriver):
         :raises ENotImplement: 未实现
         """
         request_model = \
-            '{"query": {"filtered": {"filter": {"bool": {"must": [%s], "must_not": [%s], "should": [%s]}}}}}'
+            '"query": {"filtered": {"filter": {"bool": {"must": [%s], "must_not": [%s], "should": [%s]}}}}'
 
         filter_clause_item = ['{"term": {"%s": "%s"}}' % (k, v) for k, v in self._filter_kv.iteritems()]
         filter_clause = ", ".join(filter_clause_item)
@@ -346,7 +396,7 @@ class EsEventCollector(object):
             log.i("elastic_event collection_time exceed %d, begin time reset to %d"
                   % (self._max_collect_time, collect_begin_time))
 
-        result = self._driver.query_event(collect_begin_time, collect_end_time)
+        result = self._driver.query_all(collect_begin_time, collect_end_time)
         sorted_events = [SortableEvent(self._driver.get_ts(i), self._driver.get_id(i), i) for i in result]
         sorted_events.sort()
         # 当前已排序事件的时间戳内序号都是0，将该序号重置为排序后正确的时间戳内序号
@@ -396,7 +446,7 @@ class EsCallbackSensor(PullCallbackSensor):
                  filter_kv=None,
                  mustnot_kv=None,
                  should_kv=None, minimum_should_match=1,
-                 header=None, es_persist_time=1, max_collect_time=600,
+                 header=None, query_size=100, es_persist_time=1, max_collect_time=600,
                  query_interval=3):
         """
         初始化方法
@@ -409,6 +459,7 @@ class EsCallbackSensor(PullCallbackSensor):
         :param dict should_kv: field名（k）可选为指定值（v），可传入多个表示尽量同时满足
         :param int minimum_should_match: should_kv中filed名值最少满足数量
         :param dict header: http请求头
+        :param int query_size: 单次查询数量
         :param int es_persist_time: es的持久化时间，即now-es_persist_time之前的事件才能保证已经被持久化完成
         :param int max_collect_time: 最长事件采集时间区间。超过此区间的事件将被忽略
         :param int query_interval: 查询事件的事件间隔
@@ -418,7 +469,7 @@ class EsCallbackSensor(PullCallbackSensor):
         es_driver = EsEventDriver1x(index_tmpl=index_tmpl, type=type, time_k=time_k,
                                     filter_kv=filter_kv, mustnot_kv=mustnot_kv,
                                     should_kv=should_kv, minimum_should_match=minimum_should_match,
-                                    header=header)
+                                    header=header, query_size=query_size)
         self._collector = EsEventCollector(event_driver=es_driver, timestamp=0, id_seq_no=0,
                                            es_persist_time=es_persist_time, max_collect_time=max_collect_time)
         super(EsCallbackSensor, self).__init__(query_interval)
