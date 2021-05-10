@@ -7,9 +7,9 @@
 """
 使用轮询本地文件进行感知的状态机Guardian
 """
-from ark.are import decision
-from ark.are import executor
-from ark.are import framework
+import ark.are.decision as decision
+import ark.are.executor as executor
+import ark.are.framework as framework
 from ark.component.local_sensor import LocalCallbackSensor
 
 
