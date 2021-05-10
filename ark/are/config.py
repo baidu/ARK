@@ -13,7 +13,7 @@
 
 import json
 import os
-from ark.are import exception
+import ark.are.exception as exception
 
 DEFAULT_PERSISTENT_BASEPATH = "/{}"
 GUARDIAN_ID_NAME = "GUARDIAN_ID"
@@ -28,8 +28,8 @@ class GuardianConfig(object):
 
     .. Note:: 三者之间为依次增量覆盖的关系，即远程环境变量优先级最高，其次为配置文件，系统环境变量优先级最低。
     """
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    CONF_DIR = BASE_DIR + "/../../conf"
+    BASE_DIR = os.getcwd() #通过pip安装ark，不能再通过os.path.abspath(__file__)的方式获取工作目录
+    CONF_DIR = BASE_DIR + "/conf"
     CONF_FILE = "ark.conf"
 
     __conf = {}
@@ -67,8 +67,8 @@ class GuardianConfig(object):
         """
         try:
             # 解决循环引用的问题
-            from ark.are.persistence import PersistenceDriver
-            data = PersistenceDriver().get_data(GuardianConfig.get_persistent_path("config"))
+            import ark.are.persistence
+            data = ark.are.persistence.PersistenceDriver().get_data(GuardianConfig.get_persistent_path("config"))
             cls.__conf.update(json.loads(data))
         except exception.EPNoNodeError:
             pass

@@ -12,8 +12,8 @@ import threading
 import time
 import uuid
 
-from ark.are import log
-from ark.are import exception
+import ark.are.log as log
+import ark.are.exception as exception
 from ark.are.framework import BaseSensor
 from ark.are.framework import OperationMessage
 
@@ -95,15 +95,17 @@ class PullCallbackSensor(CallbackSensor):
     """
     主动拉取外部事件的感知器。感知器生效时会创新子线程定期进行外部事件拉取操作，并将事件推入事件队列中
     """
-    def __init__(self, query_interval=3):
+    def __init__(self, query_interval=3, max_queue=10):
         """
         初始化方法
 
-        :param int query_interval: 查询间隔
+        :param float query_interval: 查询间隔
+        :param int max_queue: 最大队列长度
         """
         self._query_interval = query_interval
         self._pull_thread = None
         self._stop_tag = False
+        self._max_queue = max_queue
 
     def active(self):
         """
@@ -133,6 +135,20 @@ class PullCallbackSensor(CallbackSensor):
             self._pull_thread = None
         self._event_queue = Queue.Queue()
 
+    def callback_event(self, event):
+        """
+        事件回调，将事件放入事件队列
+
+        :param dict event: 外部事件
+        :return: 无返回
+        :rtype: None
+        """
+        # 不使用queue自带的max-size绝对限制，代之以间隔拉长
+        if self._event_queue.qsize() > self._max_queue:
+            log.w("sensor queue exceed max:%d" % self._max_queue)
+            time.sleep(self._query_interval)
+        self._event_queue.put(event)
+
     def event_dealer(self):
         """
         事件处理函数，定期拉取外部事件
@@ -146,7 +162,7 @@ class PullCallbackSensor(CallbackSensor):
                 if event is None:
                     time.sleep(self._query_interval)
                     continue
-            except:
+            except Exception as e:
                 log.f("get event failed")
                 time.sleep(self._query_interval)
                 continue

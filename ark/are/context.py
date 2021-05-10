@@ -14,10 +14,10 @@ import pickle
 import time
 import copy
 
-from ark.are import config
-from ark.are import persistence
-from ark.are import exception
-from ark.are import log
+import ark.are.config as config
+import ark.are.persistence as persistence
+import ark.are.exception as exception
+import ark.are.log as log
 from ark.are.common import Singleton
 
 
@@ -66,7 +66,7 @@ class GuardianContext(Singleton):
                 log.i("load operation[{}] success".format(operation_id))
                 operation = pickle.loads(operation_data)
                 guardian_context.operations[operation_id] = operation
-            except:
+            except Exception as e:
                 log.f("load operation {} failed".format(operation_id))
 
         cls._context = guardian_context
@@ -100,12 +100,11 @@ class GuardianContext(Singleton):
             log.e("current guardian instance no privilege to save operation")
             raise exception.EInvalidOperation(
                 "current guardian instance no privilege to save operation")
-        operation_path = config.GuardianConfig.get_persistent_path("operations") \
-                         + "/" + operation.operation_id
+        operation_path = config.GuardianConfig.get_persistent_path("operations") + "/" + operation.operation_id
         if not persistence.PersistenceDriver().exists(operation_path):
             persistence.PersistenceDriver().create_node(path=operation_path)
         persistence.PersistenceDriver().save_data(operation_path, pickle.dumps(operation))
-        log.i("save operation_id:{} success".format(operation.operation_id))
+        log.d("save operation_id:{} success".format(operation.operation_id))
 
     def save_context(self):
         """
@@ -120,12 +119,17 @@ class GuardianContext(Singleton):
             raise exception.EInvalidOperation(
                 "current guardian instance no privilege to save context")
         context_path = config.GuardianConfig.get_persistent_path("context")
-        context_to_persist = copy.deepcopy(self)
-        # 考虑反序列化时可能异常，不使用del删除属性operations
+        context_to_persist = self
+        operations_tmp = self.operations
         context_to_persist.operations = {}
-        persistence.PersistenceDriver().save_data(context_path, pickle.dumps(context_to_persist))
+        try:
+            persistence.PersistenceDriver().save_data(context_path, pickle.dumps(context_to_persist))
+        except Exception as e:
+            self.operations = operations_tmp
+            log.r(e, "save context fail")
 
-        log.i("save context success")
+        self.operations = operations_tmp
+        log.d("save context success")
 
     def update_lock(self, is_lock):
         """
@@ -136,7 +140,7 @@ class GuardianContext(Singleton):
         :rtype: None
         """
         self.lock = is_lock
-        log.i("update context lock, {}".format(self.lock))
+        log.d("update context lock, {}".format(self.lock))
 
     def create_operation(self, operation_id, operation):
         """
@@ -149,8 +153,8 @@ class GuardianContext(Singleton):
         """
         self.operations[operation_id] = operation
         self.save_operation(operation)
-        log.i("create new operation success, operation_id:{}".
-                 format(operation_id))
+        log.d("create new operation success, operation_id:{}".
+              format(operation_id))
 
     def delete_operation(self, operation_id):
         """
@@ -161,11 +165,10 @@ class GuardianContext(Singleton):
         :rtype: None
         """
         del self.operations[operation_id]
-        operation_path = config.GuardianConfig.get_persistent_path("operations")\
-                         + "/" + operation_id
+        operation_path = config.GuardianConfig.get_persistent_path("operations") + "/" + operation_id
         persistence.PersistenceDriver().delete_node(operation_path)
-        log.i("delete operation from context success, operation_id:{}".
-                 format(operation_id))
+        log.d("delete operation from context success, operation_id:{}".
+              format(operation_id))
 
     def get_operation(self, operation_id):
         """
@@ -188,8 +191,7 @@ class GuardianContext(Singleton):
         """
         self.operations[operation_id] = operation
         self.save_operation(operation)
-        log.i("update operation success, operation_id:{}".
-                 format(operation_id))
+        log.d("update operation success, operation_id:{}".format(operation_id))
 
     def get_extend(self):
         """
@@ -210,7 +212,7 @@ class GuardianContext(Singleton):
         """
         self.extend.update(params)
         self.save_context()
-        log.i("update extend success, current extend:{}".format(self.extend))
+        log.d("update extend success, current extend:{}".format(self.extend))
 
     def del_extend(self, key):
         """
@@ -222,7 +224,7 @@ class GuardianContext(Singleton):
         """
         del self.extend[key]
         self.save_context()
-        log.i("delete extend success, current extend:{}".format(self.extend))
+        log.d("delete extend success, current extend:{}".format(self.extend))
 
     @staticmethod
     def new_period(func):
@@ -279,20 +281,19 @@ class GuardianContext(Singleton):
             :param message:
             :return:
             """
-            # 避免循环import和局部import
-            if message.__class__.__name__ != "OperationMessage":
-                raise exception.ETypeMismatch("only OperationMessage can be send()")
-            if not message.operation_id:
-                raise exception.EMissingParam("OperationMessage need operation_id")
-            if message.name == "COMPLETE_MESSAGE":
-                guardian_context = GuardianContext.get_context()
-                operation = guardian_context.get_operation(message.operation_id)
-                operation.end_operation()
-                guardian_context.delete_operation(message.operation_id)
-            else:
-                pass
-            ret = func(send_obj, message)
-            return ret
+            msg_name = message.name
+            if hasattr(message, "operation_id"):
+                msg_oid = message.operation_id
+            try:
+                ret = func(send_obj, message)
+                return ret
+            finally:
+                if msg_name == "COMPLETE_MESSAGE":
+                    guardian_context = GuardianContext.get_context()
+                    operation = guardian_context.get_operation(msg_oid)
+                    operation.end_operation()
+                    guardian_context.delete_operation(msg_oid)
+
         return wrapper
 
     @staticmethod
@@ -391,6 +392,9 @@ class Operation(object):
         :return: 无返回
         :rtype: None
         """
+        last_action = self.actions.last_action()
+        if last_action and last_action.name == name:
+            return
         self.actions.append_action(name)
         self.record_action()
 
@@ -516,6 +520,18 @@ class Actions(object):
         action = self.get_action(name)
         action.status = status
         action.endTime = end_time
+
+    def last_action(self):
+        """
+        获取最后一个执行进度
+
+        :return: 执行进度
+        :rtype: Action
+        """
+        if len(self.actions) == 0:
+            return None
+        else:
+            return self.actions[-1]
 
 
 class Period(object):

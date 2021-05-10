@@ -112,3 +112,10 @@ class EPConnectTimeout(Exception):
     持久化连接超时
     """
     pass
+
+
+class EPServerError(Exception):
+    """
+    持久化Server端异常, 如redis、zookeeper
+    """
+    pass

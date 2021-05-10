@@ -19,7 +19,6 @@ import sys
 import re
 import threading
 import time
-import types
 import traceback
 from logging import Handler
 from logging import LogRecord
@@ -31,6 +30,34 @@ LOG_ROOT = "LOG_DIR"
 LOG_CONF_DIR = "LOG_CONF_DIR"
 LOG_NAME_ARK = "ARK"
 LOG_NAME_GUARDIAN = "GUARDIAN"
+
+
+def _find_caller(n=1):
+    """
+    Find the stack frame of the caller so that we can note the source
+    file name, line number, function name and frame.
+    """
+    try:
+        frame = sys._getframe(n)
+    except Exception as e:
+        frame = sys.exc_info()[n + 1].tb_frame.f_back
+    # On some versions of IronPython, currentframe() returns None if
+    # IronPython isn't run with -X:Frames.
+    if frame is not None:
+        frame = frame.f_back
+    rv = ("(unknown file)", 0, "(unknown function)")
+    while hasattr(frame, "f_code"):
+        co = frame.f_code
+        filename = os.path.normcase(co.co_filename)
+        if filename == _srcfile:
+            frame = frame.f_back
+            continue
+        rv = (co.co_filename, frame.f_lineno, co.co_name)
+        break
+    return rv, frame
+
+
+_srcfile = os.path.normcase(_find_caller.__code__.co_filename)
 
 
 class NullLogRecord(LogRecord):
@@ -439,15 +466,15 @@ class Logger(object):
         """
         加载文件log配置，创建分框架分级别的日志
         """
-        Logger._log_conf = config.GuardianConfig.get(LOG_CONF_DIR, "../conf/")
-        Logger._log_root = config.GuardianConfig.get(LOG_ROOT, "../log/")
+        Logger._log_conf = config.GuardianConfig.get(LOG_CONF_DIR, "conf/")
+        Logger._log_root = config.GuardianConfig.get(LOG_ROOT, "log/")
         Logger._log_gid = config.GuardianConfig.get(config.GUARDIAN_ID_NAME, "UNKNOWN")
         log_conf = Logger._log_conf + "log.conf"
         if not os.path.exists(Logger._log_root):
             os.makedirs(Logger._log_root)
         try:
             logging.config.fileConfig(log_conf)
-        except:
+        except Exception as e:
             print "LOGFATAL: Parse log file config %s error, use default config: " \
                   "%s," % (log_conf, traceback.format_exc())
             # 日志配置加载失败，使用默认配置
@@ -524,6 +551,8 @@ class Logger(object):
         :rtype: None
         """
         logger = logging.getLogger(self._log_name)
+        if not logger.isEnabledFor(level):
+            return
         texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(level, texts, *json_args)
@@ -540,6 +569,8 @@ class Logger(object):
         :rtype: None
         """
         logger = logging.getLogger(self._log_name)
+        if not logger.isEnabledFor(logging.WARNING):
+            return
         texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(logging.WARNING, texts, *json_args)
@@ -556,6 +587,8 @@ class Logger(object):
         :rtype: None
         """
         logger = logging.getLogger(self._log_name)
+        if not logger.isEnabledFor(logging.FATAL):
+            return
         texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if sys.exc_info()[0] is None:
             ei = None
@@ -576,6 +609,8 @@ class Logger(object):
         :rtype: None
         """
         logger = logging.getLogger(self._log_name)
+        if not logger.isEnabledFor(logging.INFO):
+            return
         texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(logging.INFO, texts, *json_args)
@@ -592,6 +627,8 @@ class Logger(object):
         :rtype: None
         """
         logger = logging.getLogger(self._log_name)
+        if not logger.isEnabledFor(logging.ERROR):
+            return
         texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(logging.ERROR, texts, *json_args)
@@ -608,6 +645,8 @@ class Logger(object):
         :rtype: None
         """
         logger = logging.getLogger(self._log_name)
+        if not logger.isEnabledFor(logging.DEBUG):
+            return
         texts, json_args = self._format_request(logger.getEffectiveLevel(), text, args)
         if len(json_args) > 0:
             logger.log(logging.DEBUG, texts, *json_args)
@@ -692,13 +731,15 @@ class Logger(object):
         """
         输出调用日志打印的函数的函数名及形参、实参。仅当配置的日志打印级别为DEBUG时的情况下才会输出这些详细信息
         """
-        frames = inspect.stack()
-        fr = frames[4][0]
-        args_pretty = inspect.formatargvalues(*(inspect.getargvalues(fr)), formatvalue=Logger._formatvalue)
-        filename, lineno, funcname, _, _ = inspect.getframeinfo(fr, -1)
+        rv, fr = _find_caller(4)
+        filename, lineno, funcname = rv
         filename = filename.split('/')[-1]
-        if level != logging.DEBUG and funcname != "<module>":
-            return '%s:%d/%s%s' % (filename, lineno, funcname, args_pretty)
+        if level == logging.DEBUG and funcname != "<module>":
+            try:
+                args_pretty = inspect.formatargvalues(*(inspect.getargvalues(fr)), formatvalue=Logger._formatvalue)
+                return '%s:%d/%s%s' % (filename, lineno, funcname, args_pretty)
+            except:
+                return '%s:%d/%s(func arg extract fail)' % (filename, lineno, funcname)
         else:
             return '%s:%d/%s' % (filename, lineno, funcname)
 

@@ -28,9 +28,9 @@ ARK框架从过去的运维处理中，抽象核心的模式固化成框架，�
 """
 import copy
 
-from ark.are import exception
-from ark.are import log
-from ark.are import context
+import ark.are.exception as exception
+import ark.are.log as log
+import ark.are.context as context
 
 
 class BaseGraph(object):
@@ -386,12 +386,12 @@ class StateMachine(BaseGraph):
                 "node:{} is finished and not reentrance".format(state.name))
         ret = state.check(self._session, self._current_node,
                           self._nodes_process)
-        log.i("node {} check ret:{}".format(self._current_node, ret))
+        log.d("node {} check ret:{}".format(self._current_node, ret))
         if ret:
             self._nodes_process[state.name] = True
             current_state = state.process(self._session, self._current_node,
                                           self._nodes_process)
-            log.i("node process finished, next node:{}".format(
+            log.d("node process finished, next node:{}".format(
                 current_state))
             if current_state == self._ARK_NODE_END:
                 self._current_node = current_state
@@ -434,12 +434,12 @@ class DependencyFlow(BaseGraph):
             else:
                 ret = node.check(self._session, self._current_node,
                                  self._nodes_process)
-                log.i("node {} check ret:{}".format(self._current_node, ret))
+                log.d("node {} check ret:{}".format(self._current_node, ret))
                 if ret:
                     self._nodes_process[node.name] = True
                     current_node = node.process(
                         self._session, self._current_node, self._nodes_process)
-                    log.i("node process finished, suggest next "
+                    log.d("node process finished, suggest next "
                              "node:{}".format(current_node))
                     if current_node == self._ARK_NODE_END:
                         self._status = self.Status.FINISHED
@@ -507,8 +507,6 @@ class PersistedStateMachine(StateMachine):
         """
         带有持久化功能的状态机启动执行。状态机启动后，会根据每个节点执行的返回值，执行下一个节点，直到返回
         结束或执行异常。在每个节点执行完成后，会向结果队列中发送消息，由主进程进行处理
-
-
 
         :return: 无返回
         :rtype: None

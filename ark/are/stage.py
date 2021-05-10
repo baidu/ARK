@@ -7,11 +7,11 @@
 """
 分级操作通用模块，可以用来构造相应的状态机节点
 """
-from ark.are import exception
-from ark.are import graph
-from ark.are import log
-from ark.are import context
-from ark.are import config
+import ark.are.exception as exception
+import ark.are.graph as graph
+import ark.are.log as log
+import ark.are.context as context
+import ark.are.config as config
 
 DELIMITER_NAME = "STAGE_NAME_DELIMITER"
 

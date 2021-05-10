@@ -16,10 +16,10 @@ import urlparse
 import string
 from SimpleHTTPServer import SimpleHTTPRequestHandler
 
-from ark.are import config
-from ark.are import log
-from ark.are import client
-from ark.are import exception
+import ark.are.config as config
+import ark.are.log as log
+import ark.are.client as client
+import ark.are.exception as exception
 
 
 class RequestHandler(SimpleHTTPRequestHandler):
@@ -110,6 +110,6 @@ class ArkServer(object):
             SocketServer.TCPServer.allow_reuse_address = True
             _server = SocketServer.TCPServer(('', self._port), handler)
             _server.serve_forever()
-        except:
+        except Exception as e:
             log.f('Generic Exception')
 

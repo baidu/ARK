@@ -12,16 +12,19 @@
 
 """
 import time
+import sys
 
-from ark.are import config
-from ark.are import log
-from ark.are import persistence
+import ark.are.config as config
+import ark.are.log as log
+import ark.are.persistence as persistence
 
 
 class HAMaster(object):
     """
     主从选举客户端类, 封装基于persistence的主从选举和相应状态变更
     """
+    inst_id = sys.maxint
+
     def __init__(self, start_scheduler_func, stop_scheduler_func):
         """
         初始化方法
@@ -35,6 +38,7 @@ class HAMaster(object):
         self._pd = persistence.PersistenceDriver()
         self._pd.add_listener(self.state_listener)
         self.is_leader = False
+        self._inst_id = -1
 
     @classmethod
     def init_environment(cls):
@@ -53,7 +57,7 @@ class HAMaster(object):
         pd = persistence.PersistenceDriver()
 
         if not pd.exists(guardian_base):
-            pd.create_node(path=guardian_base)
+            pd.create_node(path=guardian_base, makepath=True)
             log.d("persistent node %s created!" % guardian_base)
         if not pd.exists(context_path):
             pd.create_node(path=context_path)
@@ -72,8 +76,12 @@ class HAMaster(object):
         """
         node_path = self.path + "/{}#".\
             format(config.GuardianConfig.get(config.INSTANCE_ID_NAME))
-        self._pd.create_node(path=node_path, value="",
-                             ephemeral=True, sequence=True, makepath=True)
+        seq_path = self._pd.create_node(path=node_path, value="",
+                                        ephemeral=True, sequence=True, makepath=True)
+        try:
+            self._inst_id = int(seq_path.split('#')[-1])
+        except ValueError:
+            self._inst_id = -1
 
     def choose_master(self):
         """
@@ -83,21 +91,31 @@ class HAMaster(object):
         """
         instance_list = self._pd.get_children(
             path=self.path, watcher=self.event_watcher)
-        instance = sorted(instance_list)[0].split("#")[0]
+        id_list = []
+        for inst in instance_list:
+            # 与self._inst_id的默认值区分开，确保异常情况下都是slave
+            inst_id = sys.maxint
+            try:
+                inst_id = int(inst.split("#")[-1])
+            except ValueError:
+                pass
+            id_list.append(inst_id)
+        min_inst_id = sorted(id_list)[0]
         # 本实例获得领导权
-        if str(instance) == str(config.GuardianConfig.get(config.INSTANCE_ID_NAME)):
+        if min_inst_id == self._inst_id:
             if not self.is_leader:
                 self._start_scheduler_func()
                 self.is_leader = True
                 log.i("I am new master, scheduler")
             else:
                 log.i("I am new master, and is old master, "
-                         "no longer reschedule")
+                      "no longer reschedule")
         # 本实例没有获得领导权
         else:
             if self.is_leader:
                 self._stop_scheduler_func()
                 self.is_leader = False
+                self._pd.disconnect()
                 log.i("I am slave, stop scheduler")
             else:
                 log.i("I am slave, and is old slave, "
@@ -120,7 +138,7 @@ class HAMaster(object):
                         path=self.path, watcher=self.event_watcher)
                     log.i("guardian instance state recreate finished")
                     break
-                except:
+                except Exception as e:
                     log.f("create instance err")
                 time.sleep(1)
         elif state == persistence.PersistenceEvent.PersistState.SUSPENDED:
@@ -143,7 +161,7 @@ class HAMaster(object):
                 or event.type == persistence.PersistenceEvent.EventType.DELETED \
                 or event.type == persistence.PersistenceEvent.EventType.CHANGED \
                 or event.type == persistence.PersistenceEvent.EventType.CHILD:
-            log.i("event change, state:{}".format(event.state))
+            log.d("event change, state:{}".format(event.state))
             self.choose_master()
         else:
-            log.i("event unrecognized")
+            log.d("event unrecognized")

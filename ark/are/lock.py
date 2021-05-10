@@ -7,10 +7,11 @@
 """
 **lock** 框架提供的分布式锁模块，使用分布式强一致系统实现（当前版本使用Zookeeper)，用于竞态条件控制，如并发度控制，主从等
 
-"""
-from ark.are import config
-from kazoo.client import KazooClient
+TODO 需要对接persist模块，当前功能已废弃
 
+"""
+import ark.are.config as config
+from kazoo.client import KazooClient
 
 class Lock(object):
     """

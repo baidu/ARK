@@ -14,8 +14,14 @@
 * ``StringUtil`` 字符串操作工具类，统一封装字符串相关的处理接口
 """
 
-from ark.are import exception
+import ark.are.exception as exception
 import re
+import os
+import threading
+import traceback
+import sys
+import warnings
+import unittest
 
 
 class Singleton(object):
@@ -152,4 +158,199 @@ class StringUtil(object):
         # 这里re.sub()函数第二个替换参数用到了一个匿名回调函数，回调函数的参数x为一个匹配对象，返回值为一个处理后的字符串
         camel_format = re.sub(r'(_\w)', lambda x: x.group(1)[1].upper(),
                               underline_format)
-        return camel_format 
+        return camel_format
+
+
+class ParametrizedTestCase(unittest.TestCase):
+    """ TestCase classes that want to be parametrized should
+        inherit from this class.
+    """
+
+    def __init__(self, methodName='runTest', param=None):
+        super(ParametrizedTestCase, self).__init__(methodName)
+        self.param = param
+
+    @staticmethod
+    def parametrize(testcase_klass, param=None):
+        """ Create a suite containing all tests taken from the given
+            subclass, passing them the parameter 'param'.
+        """
+        testloader = unittest.TestLoader()
+        testnames = testloader.getTestCaseNames(testcase_klass)
+        suite = unittest.TestSuite()
+        for name in testnames:
+            suite.addTest(testcase_klass(name, param=param))
+        return suite
+
+# 下列代码用于避免在多线程场景下fork时子进程hung的问题
+def _monkeypatch_os_fork_functions():
+    """
+    Replace os.fork* with wrappers that use ForkSafeLock to acquire
+    all locks before forking and release them afterwards.
+    """
+    builtin_function = type(''.join)
+    if hasattr(os, 'fork') and isinstance(os.fork, builtin_function):
+        global _orig_os_fork
+        _orig_os_fork = os.fork
+        os.fork = _os_fork_wrapper
+    if hasattr(os, 'forkpty') and isinstance(os.forkpty, builtin_function):
+        global _orig_os_forkpty
+        _orig_os_forkpty = os.forkpty
+        os.forkpty = _os_forkpty_wrapper
+
+
+_fork_lock = threading.Lock()
+_prepare_call_list = []
+_prepare_call_exceptions = []
+_parent_call_list = []
+_child_call_list = []
+
+
+def _atfork(prepare=None, parent=None, child=None):
+    """A Python work-a-like of pthread_atfork.
+
+    Any time a fork() is called from Python, all 'prepare' callables will
+    be called in the order they were registered using this function.
+    After the fork (successful or not), all 'parent' callables will be called in
+    the parent process.  If the fork succeeded, all 'child' callables will be
+    called in the child process.
+    No exceptions may be raised from any of the registered callables.  If so
+    they will be printed to sys.stderr after the fork call once it is safe
+    to do so.
+    """
+    assert not prepare or callable(prepare)
+    assert not parent or callable(parent)
+    assert not child or callable(child)
+    _fork_lock.acquire()
+    try:
+        if prepare:
+            _prepare_call_list.append(prepare)
+        if parent:
+            _parent_call_list.append(parent)
+        if child:
+            _child_call_list.append(child)
+    finally:
+        _fork_lock.release()
+
+
+def _call_atfork_list(call_list):
+    """
+    Given a list of callables in call_list, call them all in order and save
+    and return a list of sys.exc_info() tuples for each exception raised.
+    """
+    exception_list = []
+    for func in call_list:
+        try:
+            func()
+        except Exception as e:
+            exception_list.append(sys.exc_info())
+    return exception_list
+
+
+def _prepare_to_fork_acquire():
+    """Acquire our lock and call all prepare callables."""
+    _fork_lock.acquire()
+    _prepare_call_exceptions.extend(_call_atfork_list(_prepare_call_list))
+
+
+def _parent_after_fork_release():
+    """
+    Call all parent after fork callables, release the lock and print
+    all prepare and parent callback exceptions.
+    """
+    prepare_exceptions = list(_prepare_call_exceptions)
+    del _prepare_call_exceptions[:]
+    exceptions = _call_atfork_list(_parent_call_list)
+    _fork_lock.release()
+    _print_exception_list(prepare_exceptions, 'before fork')
+    _print_exception_list(exceptions, 'after fork from parent')
+
+
+def _child_after_fork_release():
+    """
+    Call all child after fork callables, release lock and print all
+    all child callback exceptions.
+    """
+    del _prepare_call_exceptions[:]
+    exceptions = _call_atfork_list(_child_call_list)
+    _fork_lock.release()
+    _print_exception_list(exceptions, 'after fork from child')
+
+
+def _print_exception_list(exceptions, message, output_file=None):
+    """
+    Given a list of sys.exc_info tuples, print them all using the traceback
+    module preceeded by a message and separated by a blank line.
+    """
+    output_file = output_file or sys.stderr
+    message = 'Exception %s:\n' % message
+    for exc_type, exc_value, exc_traceback in exceptions:
+        output_file.write(message)
+        traceback.print_exception(exc_type, exc_value, exc_traceback,
+                                  file=output_file)
+        output_file.write('\n')
+
+
+def _os_fork_wrapper():
+    """Wraps os.fork() to run atfork handlers."""
+    pid = None
+    _prepare_to_fork_acquire()
+    try:
+        pid = _orig_os_fork()
+    finally:
+        if pid == 0:
+            _child_after_fork_release()
+        else:
+            # We call this regardless of fork success in order for
+            # the program to be in a sane state afterwards.
+            _parent_after_fork_release()
+    return pid
+
+
+def _os_forkpty_wrapper():
+    """Wraps os.forkpty() to run atfork handlers."""
+    pid = None
+    _prepare_to_fork_acquire()
+    try:
+        pid, fd = _orig_os_forkpty()
+    finally:
+        if pid == 0:
+            _child_after_fork_release()
+        else:
+            _parent_after_fork_release()
+    return pid, fd
+
+
+def patch_logging():
+    """
+    打logging补丁
+
+    :return:
+    """
+    _monkeypatch_os_fork_functions()
+    logging = sys.modules.get('logging')
+    if logging and getattr(logging, 'fixed_for_atfork', None):
+        return
+    if logging:
+        warnings.warn('logging module already imported before patch')
+    import logging
+    if logging.getLogger().handlers:
+        raise exception.ETypeMismatch('logging handlers registered before')
+
+    logging._acquireLock()
+    try:
+        def fork_safe_createLock(self):
+            """
+            线程安全的锁
+            :param self:
+            :return:
+            """
+            self._orig_createLock()
+            _atfork(self.lock.acquire, self.lock.release, self.lock.release)
+
+        logging.Handler._orig_createLock = logging.Handler.createLock
+        logging.Handler.createLock = fork_safe_createLock
+        _atfork(logging._acquireLock, logging._releaseLock, logging._releaseLock)
+        logging.fixed_for_atfork = True
+    finally:
+        logging._releaseLock()

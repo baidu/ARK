@@ -16,15 +16,11 @@ import time
 import copy
 import multiprocessing
 
-from ark.are import config
-from ark.are import context
-from ark.are import exception
-from ark.are import log
-from ark.are.ha import HAMaster
+import ark.are.context as context
+import ark.are.exception as exception
+import ark.are.log as log
+import ark.are.ha as ha
 from ark.are.report import ArkServer
-
-
-EXECUTOR_OPERATION_ID = "EXECUTOR_OPERATION_ID"
 
 
 class Message(object):
@@ -176,11 +172,22 @@ class Listener(object):
         """
         return self._concerned_message_list
 
+    @context.GuardianContext.complete_operation
+    def on_message_wrapper(self, message):
+        """
+        消息处理入口方法，消息处理器获得关注的消息后，调用此方法进行消息处理。装饰器用来完成一次操作的记录及清理操作。此函数通常不应被继承
+
+        :param Message message: 消息对象
+        :return: 无返回
+        :rtype: None
+        """
+        return self.on_message(message)
+
     def on_message(self, message):
         """
         消息处理入口方法，消息处理器获得关注的消息后，调用此方法进行消息处理。
 
-        ..Note:: 该方法必须被实现，不能直接调用
+        .. Note:: 该方法必须被实现，不能直接调用
 
         :param Message message: 消息对象
         :return: 无返回
@@ -214,7 +221,9 @@ class Listener(object):
         """
         if multiprocessing.current_process().name != "MainProcess":
             raise exception.ENotImplement("send() only be used in \'MainProcess\'")
-        self._message_pump.put(message)
+        # 此处使用深拷贝，防止后续处理中造成环形引用
+        msg_cp = copy.deepcopy(message)
+        self._message_pump.put(msg_cp)
         log.d("send message to message pump success, message:{}".format(
             message.name))
 
@@ -229,7 +238,38 @@ class MessagePump(object):
     _message_queue = []
     _listener_list = []
     _listener_table = {}
-    _stop_tag = False
+    _stop_tag = True
+    _short_circuit_mode = False
+
+    def mode(self, short_circuit=False):
+        """
+        设置运行模式。短路模式下，会尽可能跳过主线程不必要的处理流程，如会跳过DecisionMaker，会跳过主线程的自动持久化
+
+        :param bool short_circuit: 短路模式开关
+        :return: 无返回
+        :rtype: None
+        """
+        self._short_circuit_mode = short_circuit
+        return self
+
+    def _short_circuit_msg(self, message):
+        """
+        短路模式下，改写消息实现短路处理效果，跳过DecisionMaker，直接生成决策消息进行执行处理
+
+        :param OperationMessage message: 消息
+        :return: 处理后的message
+        :rtype: Message
+        """
+        if not self._short_circuit_mode:
+            return message
+        if message.name == "SENSED_MESSAGE":
+            params_cp = copy.deepcopy(message.params)
+            return OperationMessage(
+                "DECIDED_MESSAGE", message.operation_id, params_cp)
+        elif message.name == "COMPLETE_MESSAGE":
+            return message
+        else:
+            return message
 
     def add_listener(self, listener):
         """
@@ -311,36 +351,51 @@ class MessagePump(object):
         """
         pass
 
-    def run_loop(self):
+    def run_loop(self, idle_sleep):
         """
         消息泵驱动逻辑。从消息泵中取消息并分发给关注此消息的处理器执行。
         为避免执行异常退出，消息泵捕获处理器执行的所有异常。当消息泵中无消息时，
         添加空闲消息，以驱动需要持续运行的消息处理器执行。
 
+        :param float idle_sleep: 如果无事件要处理则强制sleep对应时间
         :return: 无返回
         :rtype: None
         """
         while not self._stop_tag:
             if not self._message_queue:
-                self._message_queue.append(IDLEMessage())
+                self.put(IDLEMessage())
+                is_idle = True
+            else:
+                is_idle = False
             message = self._message_queue[0]
+            if not is_idle:
+                # 将消息短路处理，跳过DecisionMaker，直接返回决策消息进行执行处理。如果返回None，则不需要处理，直接跳过该消息。
+                message = self._short_circuit_msg(message)
+                if message is None:
+                    self._message_queue.pop(0)
+                    continue
+
             for listener in self._listener_list:
                 if message.name not in self.list_listener_concern(listener):
                     continue
                 else:
                     pass
                 try:
-                    if isinstance(message, OperationMessage):
+                    if not is_idle:
                         log.Logger.setoid(message.operation_id)
-                    listener.on_message(message)
-                except:
+                    listener.on_message_wrapper(message)
+                except Exception as e:
                     log.f("error occurred on listener:{}".format(listener.__class__))
                 finally:
                     log.Logger.clearoid()
 
-            self._message_queue.remove(message)
-            if not isinstance(message, IDLEMessage):
-                self.on_persistence()
+            self._message_queue.pop(0)
+            if not is_idle:
+                if not self._short_circuit_mode:
+                    self.on_persistence()
+            else:
+                if not self._message_queue:
+                    time.sleep(idle_sleep)
 
 
 class GuardianFramework(MessagePump):
@@ -360,6 +415,7 @@ class GuardianFramework(MessagePump):
     _is_leader = False
     _run_tag = True
     __TIME_INTERVAL = 3
+    __IDLE_INTERVAL = 0.0001
 
     def start(self, pmode):
         """
@@ -369,20 +425,14 @@ class GuardianFramework(MessagePump):
         :return: 无返回
         :rtype: None
         """
-        from ark.are import persistence
-        if pmode == "zookeeper":
-            persistence.PersistenceDriver = persistence.ZkPersistence
-        else:
-            persistence.PersistenceDriver = persistence.FilePersistence
-        config.GuardianConfig.load_config()
         ArkServer().start()
-        HAMaster.init_environment()
-        leader_election = HAMaster(self.obtain_leader, self.release_leader)
+        ha.HAMaster.init_environment()
+        leader_election = ha.HAMaster(self.obtain_leader, self.release_leader)
         leader_election.create_instance()
         leader_election.choose_master()
         while self._run_tag:
             if self._is_leader:
-                self.run_loop()
+                self.run_loop(self.__IDLE_INTERVAL)
             else:
                 time.sleep(self.__TIME_INTERVAL)
         else:
@@ -396,7 +446,6 @@ class GuardianFramework(MessagePump):
         :rtype: None
         """
         self._is_leader = True
-        self._stop_tag = False
         self._context = context.GuardianContext.load_context()
         MessagePump._message_queue = self._context.message_list
         self._recover_executing_message()
@@ -404,6 +453,7 @@ class GuardianFramework(MessagePump):
         for listener in self._listener_list:
             listener.bind_pump(self)
             listener.active()
+        self._stop_tag = False
     
     def _recover_executing_message(self):
         for operation in self._context.operations.itervalues():
@@ -439,7 +489,7 @@ class GuardianFramework(MessagePump):
         :rtype: None
         """
         self._context.save_context()
-        log.i("context persistent success")
+        log.d("context persistent success")
 
 
 class BaseSensor(Listener):
@@ -473,10 +523,9 @@ class BaseDecisionMaker(Listener):
     """
     决策基类
     """
-    @context.GuardianContext.complete_operation
     def on_message(self, message):
         """
-        消息处理函数。装饰器用来完成一次操作的记录及清理操作
+        消息处理函数。
 
         :param Message message: 消息对象
         :return: 无返回
@@ -504,8 +553,7 @@ class BaseExecutor(Listener):
     def on_message(self, message):
         """
         触发执行并返回结果，``on_execute_message`` 可能为同步或异步操作，
-        若为异步操作，则返回结果并非本次执行的结果，
-        需要根据ret中EXECUTOR_OPERATION_ID字段确定是哪个操作的结果
+        若为异步操作，则应返回None
 
         :param Message message: 消息对象
         :return: 无返回

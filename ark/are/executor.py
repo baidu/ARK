@@ -11,12 +11,13 @@ import Queue
 import copy
 import multiprocessing
 import time
+import uuid
 
-from ark.are import graph
-from ark.are import context
-from ark.are import framework
-from ark.are import log
-from ark.are import exception
+import ark.are.graph as graph
+import ark.are.context as context
+import ark.are.framework as framework
+import ark.are.log as log
+import ark.are.exception as exception
 
 
 class BaseExecFuncSet(object):
@@ -57,16 +58,16 @@ class BaseExecFuncSet(object):
         return getattr(self, func_name)(params)
 
 
-def run_process(cls_instance, message):
+def run_process(cls_instance, operation):
     """
     运行一个子进程
 
     :param MultiProcessExecutor cls_instance: 运行实例
-    :param Message message: 消息
+    :param Operation operation: operation操作对象
     :return: 执行结果
     :rtype: dict
     """
-    return cls_instance.message_handler(message)
+    return cls_instance.message_handler(operation)
 
 
 class MultiProcessExecutor(framework.BaseExecutor):
@@ -89,8 +90,8 @@ class MultiProcessExecutor(framework.BaseExecutor):
                 or process_count > 1000:
             raise exception.ETypeMismatch(
                 "param process_count must be 1-1000 integer")
-        manager = multiprocessing.Manager()
-        self._result_queue = manager.Queue()
+        self._manager = multiprocessing.Manager()
+        self._result_queue = self._manager.Queue()
         self._concerned_message_list = ["IDLE_MESSAGE", "DECIDED_MESSAGE"]
         self._process_count = process_count
         self._process_pool = None
@@ -98,6 +99,7 @@ class MultiProcessExecutor(framework.BaseExecutor):
     def __getstate__(self):
         self_dict = self.__dict__.copy()
         del self_dict['_process_pool']
+        del self_dict['_manager']
         return self_dict
 
     def __setstate__(self, state):
@@ -108,6 +110,24 @@ class MultiProcessExecutor(framework.BaseExecutor):
 
     def inactive(self):
         self._process_pool.terminate()
+
+    def _persist_operation(self, message):
+        """
+        如果message有更新，则更新Operation，并将最新的Operation返回
+
+        :param Message message: 消息对象
+        :return: 持久化过的operation
+        :rtype: Operation
+        """
+        guardian_context = context.GuardianContext.get_context()
+        operation = guardian_context.get_operation(message.operation_id)
+        if not message.params:
+            return operation
+        # 判断如果不同则更新operation并保存
+        if cmp(message.params, operation.operation_params) != 0:
+            operation.operation_params.update(message.params)
+            guardian_context.save_operation(operation)
+        return operation
 
     def on_execute_message(self, message):
         """
@@ -120,8 +140,10 @@ class MultiProcessExecutor(framework.BaseExecutor):
         :raises EUnknownEvent: 未知消息异常
         """
         if message.name == "DECIDED_MESSAGE":
-            self.on_pre_action(message)
-            self._process_pool.apply_async(run_process, (self, message))
+            operation = self._persist_operation(message)
+            self.on_pre_action(operation)
+            self._process_pool.apply_async(run_process, (self, operation, ))
+
         elif message.name == "IDLE_MESSAGE":
             try:
                 ret = self._result_queue.get(block=False)
@@ -145,46 +167,46 @@ class MultiProcessExecutor(framework.BaseExecutor):
         """
         pass
 
-    def on_pre_action(self, message):
+    def on_pre_action(self, operation):
         """
         操作前的前置动作，在开启子进程执行操作之前调用
 
-        :param Message message: 消息对象
+        :param Operation operation: operation操作对象
         :return: 无返回
         """
         pass
 
-    def message_handler(self, message):
+    def message_handler(self, operation):
         """
         消息处理逻辑，该函数调用具体的消息执行函数，并获取结果放入结果队列中
 
         .. Note:: 由于操作异步执行，因此各子进程执行结果统一放入多进程安全的结果队列，
                  由主进程统一进程结果的后续处理
 
-        :param Message message: 消息对象
+        :param Operation operation: operation操作对象
         :return: 无返回
         :rtype: None
         """
         try:
-            log.Logger.setoid(message.operation_id)
-            log.i("process new message")
-            log.d("process new message,param:%s" % str(message.params))
-            ret = self.execute_message(message)
+            log.Logger.setoid(operation.operation_id)
+            log.i("operation execute")
+            log.d("operation execute, param:%s" % str(operation.operation_params))
+            ret = self.execute(operation)
         except Exception as e:
             log.f("execute_message fail")
             ret = "err:{}".format(e)
 
         message = framework.OperationMessage(
-            "COMPLETE_MESSAGE", message.operation_id, ret)
+            "COMPLETE_MESSAGE", operation.operation_id, ret)
         self._result_queue.put(message)
         log.Logger.clearoid()
         return
 
-    def execute_message(self, message):
+    def execute(self, operation):
         """
         事件具体执行逻辑
 
-        :param Message message: 消息对象
+        :param Operation operation: operation操作对象
         :return: 执行结果
         :rtype: dict
         :raises ENotImplement: 未实现
@@ -193,32 +215,32 @@ class MultiProcessExecutor(framework.BaseExecutor):
 
 
 class CallbackExecutor(MultiProcessExecutor):
+    """
+    回调型执行器，该执行器一般与 ``BaseExecFuncSet`` 子类绑定，根据待执行消息中
+    _exec_key字段值，回调func_set中定义的操作方法，并返回执行结果
+    """
+    _exec_key = ".inner_executor_key"
+
+    def __init__(self, func_set, process_count=1):
         """
-        回调型执行器，该执行器一般与 ``BaseExecFuncSet`` 子类绑定，根据待执行消息中
-        _exec_key字段值，回调func_set中定义的操作方法，并返回执行结果
+        初始化方法
+
+        :param BaseExecFuncSet func_set: 回调方法对象
+        :param int process_count: 进程数
         """
-        _exec_key = ".inner_executor_key"
+        super(CallbackExecutor, self).__init__(process_count)
+        self._func_set = func_set
 
-        def __init__(self, func_set, process_count=1):
-            """
-            初始化方法
+    def execute(self, operation):
+        """
+        执行消息的具体逻辑
 
-            :param BaseExecFuncSet func_set: 回调方法对象
-            :param int process_count: 进程数
-            """
-            super(CallbackExecutor, self).__init__(process_count)
-            self._func_set = func_set
-
-        def execute_message(self, message):
-            """
-            执行消息的具体逻辑
-
-            :param Message message: 消息对象
-            :return: 执行结果
-            :rtype: dict
-            """
-            return self._func_set.exec_func(
-                message.params[self._exec_key], message.params)
+        :param Operation operation: operation操作对象
+        :return: 执行结果
+        :rtype: dict
+        """
+        return self._func_set.exec_func(
+            operation.operation_params[self._exec_key], operation.operation_params)
 
 
 class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelper):
@@ -233,7 +255,6 @@ class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelp
             传递给运行中的状态机，用户可用状态机session.control_message获得该控制消息
             的参数。
     """
-    _inner_operation_key = ".inner_operation_key"
 
     def __init__(self, nodes, process_count=1):
         """
@@ -247,29 +268,17 @@ class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelp
         self._concerned_message_list.append("CONTROL_MESSAGE")
 
         self._graphs = {}
-        manager = multiprocessing.Manager()
-        self._control_message = manager.dict()
+        self._control_message = self._manager.dict()
 
-    def on_pre_action(self, message):
-        """
-        操作前的前置动作，避免在子进程中获取context
-
-        :param Message message: 消息对象
-        :return: 无返回
-        """
-        guardian_context = context.GuardianContext.get_context()
-        operation = guardian_context.get_operation(message.operation_id)
-        message.params[self._inner_operation_key] = operation
-
-    def execute_message(self, message):
+    def execute(self, operation):
         """
         执行消息
 
-        :param Message message: 消息对象
+        :param Operation operation: operation操作对象
         :return: 无返回
         :rtype: None
         """
-        state_machine = self._create_state_machine(message, self._nodes)
+        state_machine = self._create_state_machine(operation, self._nodes)
         # 状态机启动
         state_machine.start()
         try:
@@ -292,13 +301,14 @@ class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelp
         :return: 无返回
         :rtype: None
         """
+        message_name = None
         if reason == graph.PersistedStateMachineHelper.Reason.CONTROL:
             message_name = "PERSIST_SESSION_MESSAGE"
         elif reason == graph.PersistedStateMachineHelper.Reason.STARTED:
             message_name = "STATE_COMPLETE_MESSAGE"
         elif reason == graph.PersistedStateMachineHelper.Reason.NODE_CHANGED:
             message_name = "STATE_COMPLETE_MESSAGE"
-        if session is not None:
+        if session is not None and message_name is not None:
             params = {
                 "session": session,
                 "finished_node": finished_name,
@@ -308,9 +318,13 @@ class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelp
             notice = framework.OperationMessage(
                 message_name,
                 str(session.id), params)
-            self._result_queue.put(notice)
+            try:
+                self._result_queue.put(notice)
+            except IOError:
+                log.f("result_queue.put fail, retry")
+                self._result_queue.put(notice)
         else:
-            log.e("operation persist but session is None")
+            log.e("operation persist but session is None or reason unknown")
 
     def get_control_message(self, session):
         """
@@ -321,27 +335,27 @@ class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelp
         :rtype: str, object
         """
         try:
+            if session.id not in self._control_message or self._control_message[session.id] is None:
+                return None, None
             control = self._control_message[session.id]
             return control['control_id'], control['message']
-        except:
+        except Exception as e:
             log.f("get control message fail")
             return None, None
 
-    def _create_state_machine(self, message, nodes):
+    def _create_state_machine(self, operation, nodes):
         """
         创建状态机。新建时创建，实例迁移时重新加载
 
-        :param Message message: 消息对象
+        :param Operation operation: operation操作对象
         :return: 状态机实例
         :rtype: StateMachine
         """
-        operation = copy.deepcopy(message.params[self._inner_operation_key])
-        del message.params[self._inner_operation_key]
 
         state_machine_session = operation.session
         if not state_machine_session:
-            session = graph.PersistedStateMachineSession(id=message.operation_id,
-                                                         params=message.params)
+            session = graph.PersistedStateMachineSession(id=operation.operation_id,
+                                                         params=operation.operation_params)
             state_machine = graph.PersistedStateMachine(session)
             for node in nodes:
                 state_machine.add_node(node)
@@ -363,7 +377,10 @@ class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelp
                 else:
                     state_machine.add_node(node)
             # reload控制消息
-            self._control_message[session.id] = session.control_message
+            if session.control_message:
+                self.on_extend_message(session.control_message)
+            if session.id in self._control_message and self._control_message[session.id]:
+                self._control_message[session.id]['control_id'] = session.last_control_id
 
         self._graphs[session.id] = state_machine
         state_machine.set_helper(self)
@@ -378,3 +395,18 @@ class StateMachineExecutor(MultiProcessExecutor, graph.PersistedStateMachineHelp
         :rtype: None
         """
         return super(StateMachineExecutor, self).send(message)
+
+    def on_extend_message(self, message):
+        """
+        扩展消息的处理逻辑
+
+        :param Message message: 消息对象
+        :return: 无返回
+        :rtype: None
+        """
+        # 执行器从消息泵获取控制消息
+        control = {
+            'message': message,
+            'control_id': uuid.uuid1()
+        }
+        self._control_message[message.operation_id] = copy.deepcopy(control)

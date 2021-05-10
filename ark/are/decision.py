@@ -9,10 +9,9 @@
 """
 import copy
 
-from ark.are import framework
-from ark.are import exception
-from ark.are import log
-from ark.are import context
+import ark.are.framework as framework
+import ark.are.exception as exception
+import ark.are.log as log
 
 
 class DecisionMaker(framework.BaseDecisionMaker):
@@ -35,7 +34,7 @@ class DecisionMaker(framework.BaseDecisionMaker):
         :rtype: None
         :raises EUnknownEvent: 位置事件异常
         """
-        log.i("on decision message:{}".format(message.name))
+        log.d("on decision message:{}".format(message.name))
         if message.name == "SENSED_MESSAGE":
             decided_message = self.decision_logic(message)
             self.send(decided_message)
@@ -125,5 +124,5 @@ class StateMachineDecisionMaker(DecisionMaker):
         :rtype: Message
         """
         decided_message = framework.OperationMessage(
-            "DECIDED_MESSAGE", message.operation_id, message.params)
+            "DECIDED_MESSAGE", message.operation_id, {})
         return decided_message

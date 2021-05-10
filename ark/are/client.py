@@ -16,10 +16,10 @@ import httplib
 import json
 import time
 
-from ark.are import common
-from ark.are import config
-from ark.are import log
-from ark.are import exception
+import ark.are.common as common
+import ark.are.config as config
+import ark.are.log as log
+import ark.are.exception as exception
 
 
 class BaseClient(common.Singleton):
