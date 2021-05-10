@@ -9,7 +9,7 @@ import time
 import Queue
 
 config.GuardianConfig.set({"LOG_CONF_DIR": "./", "LOG_ROOT": "./log"})
-config.GuardianConfig.set({"ARK_ES_HOST": "1.0.0.1", "ARK_ES_PORT": "10000"})
+config.GuardianConfig.set({"ARK_ES_HOST": "cp01-ark05.epc.baidu.com", "ARK_ES_PORT": "8920"})
 
 
 class TestEsEvent(EsCallbackSensor):
@@ -67,7 +67,7 @@ class TestEsEvent(EsCallbackSensor):
 if __name__ == '__main__':
 
     sensor = TestEsEvent("arktst-%Y%m%d", "test_es", "timestamp", max_collect_time=60000,
-                         header={"authorization": "token=123"}, es_persist_time=6)
+                         header={"authorization": "token=8a4df08d5def16a2016540b5bf390025"}, es_persist_time=6)
     sensor.active()
     while True:
         message = IDLEMessage()

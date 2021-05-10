@@ -32,5 +32,5 @@ def guardian_main(mode):
     :return:
     """
     guardian = LocalPullKeyMappingGuardian(
-        "../event", {"hello": "say_hello"}, "strategy", DemoExecFuncSet())
+        "../event", {"hello": "say_hello"}, "strategy", DemoExecFuncSet(), query_interval=0.1, max_queue=10)
     return guardian
