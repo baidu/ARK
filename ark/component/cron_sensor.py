@@ -14,8 +14,8 @@ import time
 import json
 
 from croniter import croniter
-from ark.are import log
-from ark.are import exception
+import ark.are.log as log
+import ark.are.exception as exception
 from ark.are.sensor import PullCallbackSensor
 
 
@@ -217,12 +217,12 @@ class CronSensor(PullCallbackSensor):
                 add_list = current_cron - self._old_cron
                 if len(delete_list) != 0:
                     self._clock.delete_cron(delete_list)
-                    log.i("refresh cron list, delete:{num}".format(num=len(delete_list)))
+                    log.d("refresh cron list, delete:{num}".format(num=len(delete_list)))
                 if len(add_list) != 0:
                     self._clock.add_cron(add_list)
-                    log.i("refresh cron list, add:{num}".format(num=len(add_list)))
+                    log.d("refresh cron list, add:{num}".format(num=len(add_list)))
                 self._old_cron = current_cron
-            except:
+            except Exception as e:
                 log.f("reload failed, err")
 
             time.sleep(self._reload_interval)

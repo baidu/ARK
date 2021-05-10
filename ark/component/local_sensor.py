@@ -20,28 +20,41 @@ class LocalCallbackSensor(PullCallbackSensor):
 
     .. Note:: 在读取文件内容后，进行修改文件名的操作，以避免对同一事件的重复调用（重复读取文件）
     """
-    def __init__(self, event_file, query_interval=3):
+    def __init__(self, event_file, query_interval=3, max_queue=10):
         """
         初始化方法
 
         :param str event_file: 存放事件的文件名
-        :param int query_interval: 查询事件的时间间隔
+        :param float query_interval: 查询事件的时间间隔
+        :param int max_queue: 最大队列长度
         """
-        super(LocalCallbackSensor, self).__init__(query_interval)
+        super(LocalCallbackSensor, self).__init__(query_interval, max_queue)
         self._event_file = event_file
+        self._file_handle = None
 
     def get_event(self):
         """
-        从文件中获取事件
+        从文件中获取事件，文件中的每一行都会做为一个事件读入，读取完成后，文件会被改名
 
         :return: 事件
         :rtype: dict
         """
-        if not os.path.exists(self._event_file):
-            return None
-        with open(self._event_file, 'r') as json_file:
-            json_str = json_file.read()
-            event = json.loads(json_str)
+        if self._file_handle is None:
+            if not os.path.exists(self._event_file):
+                return None
+            try:
+                self._file_handle = open(self._event_file, 'r')
+            except IOError:
+                return None
+            if self._file_handle is None:
+                return None
+
+        json_str = self._file_handle.readline()
+        if json_str == "":
+            self._file_handle.close()
+            self._file_handle = None
             os.system("mv {} {}".format(
                 self._event_file, self._event_file + ".1"))
-            return event
+            return None
+        event = json.loads(json_str)
+        return event

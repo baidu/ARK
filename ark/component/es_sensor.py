@@ -12,10 +12,9 @@ import Queue
 import datetime
 from ark.are.sensor import PullCallbackSensor
 from ark.are.client import BaseClient
-from ark.are import log
-from ark.are import config
-from ark.are import context
-from ark.are import exception
+import ark.are.log as log
+import ark.are.config as config
+import ark.are.context as context
 
 
 class EsEventDriver(object):
@@ -31,8 +30,12 @@ class EsEventDriver(object):
 
     def __init__(self, index_tmpl, type, time_k,
                  filter_kv=None,
+                 filter_mm="term",
                  mustnot_kv=None,
-                 should_kv=None, minimum_should_match=1,
+                 mustnot_mm="term",
+                 should_kv=None,
+                 should_mm="term",
+                 minimum_should_match=1,
                  header=None, query_size=100):
         """
 
@@ -40,8 +43,11 @@ class EsEventDriver(object):
         :param str type:  需要查询的事件的所处的type
         :param str time_k:  需要查询的事件的时间属性名
         :param dict filter_kv: field名（k）必须为指定值（v），可传入多个表示必须同时满足
+        :param str filter_mm: filter（实际为must）的匹配方式，默认为term
         :param dict mustnot_kv: field名（k）必须不为指定值（v），可传入多个表示必须同时满足
+        :param str mustnot_mm: mustnot的匹配方式，默认为term
         :param dict should_kv: field名（k）可选为指定值（v），可传入多个表示尽量同时满足
+        :param str should_mm: should的匹配方式，默认为term
         :param int minimum_should_match: should_kv中filed名值最少满足数量
         :param dict header: http请求头
         :param int query_size: 单次查询数量
@@ -65,6 +71,9 @@ class EsEventDriver(object):
         self._client = BaseClient()  # 避免继承于BaseClient单例类
         self._header = header
         self._query_size = query_size
+        self._filter_mm = filter_mm
+        self._should_mm = should_mm
+        self._mustnot_mm = mustnot_mm
 
     def _compose_filter(self, time_begin, time_end):
         """
@@ -74,9 +83,25 @@ class EsEventDriver(object):
         :param int time_end:  查询筛选的结束时间
         :return: 拼接好的查询请求
         :rtype: str
-        :raises ENotImplement: 未实现
         """
-        raise exception.ENotImplement("function is not implement")
+        request_model = \
+            '"query": {"bool": {"must": [%s],"must_not": [%s],"should": [%s],' \
+            '"minimum_should_match": %d,"boost": 1.0}}'
+        filter_mm = self._filter_mm
+        should_mm = self._should_mm
+        mustnot_mm = self._mustnot_mm
+        filter_clause_item = ['{"%s": {"%s": "%s"}}' % (filter_mm, k, v) for k, v in self._filter_kv.iteritems()]
+        filter_clause = ", ".join(filter_clause_item)
+        should_clause_item = ['{"%s": {"%s": "%s"}}' % (should_mm, k, v) for k, v in self._should_kv.iteritems()]
+        should_clause = ", ".join(should_clause_item)
+        mustnot_clause_item = ['{"%s": {"%s": "%s"}}' % (mustnot_mm, k, v) for k, v in self._mustnot_kv.iteritems()]
+        mustnot_clause = ", ".join(mustnot_clause_item)
+        time_range_clause = '{"range": {"%s": {"gte": %d,"lt": %d}}}' % (self._time_k, time_begin, time_end)
+        if filter_clause != "":
+            filter_clause = time_range_clause + "," + filter_clause
+        else:
+            filter_clause = time_range_clause
+        return request_model % (filter_clause, mustnot_clause, should_clause, self._minimum_should_match)
 
     def _query_event_perpage(self, index, time_begin, time_end, pageno):
         """
@@ -173,71 +198,6 @@ class EsEventDriver(object):
         :rtype: str
         """
         return event["_id"]
-
-
-class EsEventDriver2x(EsEventDriver):
-    """
-    提供ElasticSearch2及以上版本的QueryDsl适配转换
-    """
-
-    def _compose_filter(self, time_begin, time_end):
-        """
-        根据过滤项/或者过滤表达式，以及时间字段，构造完整的ES查询请求
-
-        :param int time_begin: 查询筛选的开始时间
-        :param int time_end:  查询筛选的结束时间
-        :return: 拼接好的查询请求
-        :rtype: str
-        :raises ENotImplement: 未实现
-        """
-        request_model = \
-            '"query": {"bool": {"filter": [%s],"must_not": [%s],"should": [%s],' \
-            '"minimum_should_match": %d,"boost": 1.0}}'
-
-        filter_clause_item = ['{"term": {"%s": "%s"}}' % (k, v) for k, v in self._filter_kv.iteritems()]
-        filter_clause = ", ".join(filter_clause_item)
-        should_clause_item = ['{"term": {"%s": "%s"}}' % (k, v) for k, v in self._should_kv.iteritems()]
-        should_clause = ", ".join(should_clause_item)
-        mustnot_clause_item = ['{"term": {"%s": "%s"}}' % (k, v) for k, v in self._mustnot_kv.iteritems()]
-        mustnot_clause = ", ".join(mustnot_clause_item)
-        time_range_clause = '{"range": {"%s": {"gte": %d,"lt": %d}}}' % (self._time_k, time_begin, time_end)
-        if filter_clause != "":
-            filter_clause = time_range_clause + "," + filter_clause
-        else:
-            filter_clause = time_range_clause
-        return request_model % (filter_clause, mustnot_clause, should_clause, self._minimum_should_match)
-
-
-class EsEventDriver1x(EsEventDriver):
-    """
-    提供ElasticSearch1.x版本的QueryDsl适配转换
-    """
-
-    def _compose_filter(self, time_begin, time_end):
-        """
-        根据过滤项/或者过滤表达式，以及时间字段，构造完整的ES查询请求
-
-        :param int time_begin: 查询筛选的开始时间
-        :param int time_end:  查询筛选的结束时间
-        :return: 拼接好的查询请求
-        :rtype: str
-        :raises ENotImplement: 未实现
-        """
-        request_model = \
-            '"query": {"filtered": {"filter": {"bool": {"must": [%s], "must_not": [%s], "should": [%s]}}}}'
-
-        filter_clause_item = ['{"term": {"%s": "%s"}}' % (k, v) for k, v in self._filter_kv.iteritems()]
-        filter_clause = ", ".join(filter_clause_item)
-        should_clause_item = ['{"term": {"%s": "%s"}}' % (k, v) for k, v in self._should_kv.iteritems()]
-        should_clause = ", ".join(should_clause_item)
-        mustnot_clause_item = ['{"term": {"%s": "%s"}}' % (k, v) for k, v in self._mustnot_kv.iteritems()]
-        mustnot_clause = ", ".join(mustnot_clause_item)
-        time_range_clause = '{"range": {"%s": {"gte": %d,"lt": %d}}}' % (self._time_k, time_begin, time_end)
-        if filter_clause != "":
-            filter_clause = time_range_clause + "," + filter_clause
-        else:
-            filter_clause = time_range_clause
-        return request_model % (filter_clause, mustnot_clause, should_clause)
 
 
 class SortableEvent(object):
@@ -393,7 +353,7 @@ class EsEventCollector(object):
         # 超过最大可采集区间，重置采集开始时间。采集区间最大为max_collect_time
         if collect_end_time - collect_begin_time > self._max_collect_time:
             collect_begin_time = collect_end_time - self._max_collect_time - 1
-            log.i("elastic_event collection_time exceed %d, begin time reset to %d"
+            log.w("elastic_event collection_time exceed %d, begin time reset to %d"
                   % (self._max_collect_time, collect_begin_time))
 
         result = self._driver.query_all(collect_begin_time, collect_end_time)
@@ -444,10 +404,14 @@ class EsCallbackSensor(PullCallbackSensor):
     """
     def __init__(self, index_tmpl, type, time_k,
                  filter_kv=None,
+                 filter_mm="term",
                  mustnot_kv=None,
-                 should_kv=None, minimum_should_match=1,
+                 mustnot_mm="term",
+                 should_kv=None,
+                 should_mm="term",
+                 minimum_should_match=1,
                  header=None, query_size=100, es_persist_time=1, max_collect_time=600,
-                 query_interval=3):
+                 query_interval=3, max_queue=10, driver=None, collector=None):
         """
         初始化方法
 
@@ -455,24 +419,34 @@ class EsCallbackSensor(PullCallbackSensor):
         :param str type:  需要查询的事件的所处的type
         :param str time_k:  需要查询的事件的时间属性名
         :param dict filter_kv: field名（k）必须为指定值（v），可传入多个表示必须同时满足
+        :param str filter_mm: filter（实际为must）的匹配方式，默认为term
         :param dict mustnot_kv: field名（k）必须不为指定值（v），可传入多个表示必须同时满足
+        :param str mustnot_mm: mustnot的匹配方式，默认为term
         :param dict should_kv: field名（k）可选为指定值（v），可传入多个表示尽量同时满足
+        :param str should_mm: should的匹配方式，默认为term
         :param int minimum_should_match: should_kv中filed名值最少满足数量
         :param dict header: http请求头
         :param int query_size: 单次查询数量
         :param int es_persist_time: es的持久化时间，即now-es_persist_time之前的事件才能保证已经被持久化完成
         :param int max_collect_time: 最长事件采集时间区间。超过此区间的事件将被忽略
         :param int query_interval: 查询事件的事件间隔
+        :param int max_queue: 最大队列长度
+        :param EsEventDriver driver: 使用指定的ES驱动
+        :param EsEventCollector collector: 使用指定的事件采集器
 
         """
-
-        es_driver = EsEventDriver1x(index_tmpl=index_tmpl, type=type, time_k=time_k,
-                                    filter_kv=filter_kv, mustnot_kv=mustnot_kv,
-                                    should_kv=should_kv, minimum_should_match=minimum_should_match,
-                                    header=header, query_size=query_size)
-        self._collector = EsEventCollector(event_driver=es_driver, timestamp=0, id_seq_no=0,
-                                           es_persist_time=es_persist_time, max_collect_time=max_collect_time)
-        super(EsCallbackSensor, self).__init__(query_interval)
+        if collector is None:
+            if driver is None:
+                driver = EsEventDriver(index_tmpl=index_tmpl, type=type, time_k=time_k,
+                                       filter_kv=filter_kv, filter_mm=filter_mm,
+                                       mustnot_kv=mustnot_kv, mustnot_mm=mustnot_mm,
+                                       should_kv=should_kv, should_mm=should_mm,
+                                       minimum_should_match=minimum_should_match,
+                                       header=header, query_size=query_size)
+            collector = EsEventCollector(event_driver=driver, timestamp=0, id_seq_no=0,
+                                         es_persist_time=es_persist_time, max_collect_time=max_collect_time)
+        self._collector = collector
+        super(EsCallbackSensor, self).__init__(query_interval, max_queue)
 
     def get_event(self):
         """
@@ -494,7 +468,7 @@ class EsCallbackSensor(PullCallbackSensor):
         try:
             self._collector.begin_time = context.GuardianContext.get_context().sensor_es_event_timestamp
             self._collector.begin_isn = context.GuardianContext.get_context().sensor_es_event_ts_seq
-        except:
+        except Exception as e:
             self._collector.begin_time = 0
             self._collector.begin_isn = 0
         super(EsCallbackSensor, self).active()

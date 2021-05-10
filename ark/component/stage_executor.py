@@ -7,11 +7,10 @@
 """
 ``stage_executor`` 分级操作执行器的实现
 """
-
-from ark.are import exception
+import ark.are.exception as exception
+import ark.are.stage as stage
+import ark.are.log as log
 from ark.are.executor import StateMachineExecutor
-from ark.are import stage
-from ark.are import log
 
 
 class StageStateMachineExecutor(StateMachineExecutor):
@@ -47,50 +46,49 @@ class StageStateMachineExecutor(StateMachineExecutor):
         """
         raise exception.ENotImplement("function is not implement")
 
-    def execute_message(self, message):
+    def execute(self, operation):
         """
         执行消息
 
-        :param Message message: 消息对象
+        :param Operation operation: operation操作对象
         :return: 无返回
         :rtype: None
         """
         try:
-            nodes = self._create_nodes(message)
-            state_machine = self._create_state_machine(message, nodes)
+            nodes = self._create_nodes(operation)
+            state_machine = self._create_state_machine(operation, nodes)
             # 状态机启动
             state_machine.start()
+        except IOError as e:
+            log.f("state machine run IOError exception, process will exit.")
+            try:
+                self.exception_handler("state machine run exception:{}".format(e),
+                                       operation.operation_params)
+            except Exception as e:
+                log.f("IOError exception handler")
+            log.i("state machine run IOError exception, process exit.")
+            import os
+            os._exit(9)
         except Exception as e:
             log.f("state machine run exception")
             try:
                 self.exception_handler("state machine run exception:{}".format(e),
-                                       message.params)
-            except:
+                                       operation.operation_params)
+            except Exception as e:
                 log.f("exception handler")
         try:
             del self._control_message[state_machine.session.id]
-        except:
+        except Exception as e:
             log.f("fail to delete control message")
         log.i("state machine run finished, operationId:{}".format(state_machine.session.id))
 
-    def on_extend_message(self, message):
-        """
-        扩展消息的处理逻辑
-
-        :param Message message: 消息对象
-        :return: 无返回
-        :rtype: None
-        """
-        # 执行器从消息泵获取控制消息
-        self._control_message[message.operation_id] = message
-
-    def _create_nodes(self, message):
+    def _create_nodes(self, operation):
         """
         生成状态机节点
-        :param message:
+        :param Operation operation: operation操作对象
         :return:
         """
-        stages_model = self.get_stages_model(message.params)
+        stages_model = self.get_stages_model(operation.operation_params)
         stage_list = self._stage_builder.make_stages(stages_model)
         return stage_list
 
